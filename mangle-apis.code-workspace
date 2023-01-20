@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../mangle-super-api"
+		}
+	],
+	"settings": {}
+}
