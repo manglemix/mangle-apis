@@ -170,7 +170,7 @@ pub async fn start_api<State, Config, const N1: usize, const N2: usize>(
     pipe_name: OsString,
     config: Config,
     public_paths: [&'static str; N1],
-    routes: [(&'static str, MethodRouter<(), axum::body::Body>); N2]
+    routes: [(&'static str, MethodRouter<State>); N2]
 ) -> Result<()>
 where 
     State: Clone + Send + Sync + 'static,
@@ -255,7 +255,13 @@ where
         .context("Starting ConsoleServer")?;
 
     // Setup Router
-    let mut router = Router::new()
+    let mut router = Router::new();
+    
+    for (route, method) in routes {
+        router = router.route(route, method);
+    }
+
+    let router = router
         .with_state(state)
         .layer(
             ServiceBuilder::new()
@@ -265,15 +271,15 @@ where
                     .allow_methods(config.get_cors_allowed_methods()?)
                     .allow_origin(config.get_cors_allowed_origins()?)
                 )
-                .layer(RequireAuthorizationLayer::custom(BearerAuth::new(
-                    config.get_api_token()?,
-                    RegexSet::new(public_paths).expect("Parsing open paths for Bearer Auth")
-                )))
+                .layer(
+                    RequireAuthorizationLayer::custom(
+                        BearerAuth::new(
+                            config.get_api_token()?,
+                            RegexSet::new(public_paths).expect("Parsing open paths for Bearer Auth")
+                        )
+                    )
+                )
         );
-    
-    for (route, method) in routes {
-        router = router.route(route, method);
-    }
 
     // Setup Server
     let addr = config.get_bind_address()?;

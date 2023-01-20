@@ -223,7 +223,7 @@ impl<T: OAuthStateContainer> FromRef<T> for OAuthState {
 
 
 #[axum::debug_handler]
-pub async fn oauth_redirect(
+pub async fn _oauth_redirect(
     Query(AuthRedirectParams { state, code }): Query<AuthRedirectParams>,
     State(oauth_state): State<OAuthState>
 ) -> Html<&'static str> {
@@ -232,6 +232,17 @@ pub async fn oauth_redirect(
         CsrfToken::new(state)
     ).await
 }
+
+
+#[macro_export]
+macro_rules! oauth_redirect {
+    () => {
+        crate::axum::routing::get(mangle_api_core::auth::oauth2::_oauth_redirect)
+    };
+}
+
+
+pub use oauth_redirect;
 
 
 pub fn initiate_oauth<const PKCE: bool>(
