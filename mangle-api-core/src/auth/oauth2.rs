@@ -1,10 +1,10 @@
-use std::{sync::{Arc, Weak}, collections::HashMap, time::{Duration}};
+use std::{sync::{Arc}, collections::HashMap, time::{Duration}, future::Future};
 
 use log::warn;
 use parking_lot::Mutex;
 
-use axum::{extract::{Query, State, WebSocketUpgrade, ws::Message, FromRef}, response::Response};
-use oauth2::{url::Url, AuthorizationCode, CsrfToken, AuthUrl, TokenUrl, basic::BasicClient, ClientId, ClientSecret, RedirectUrl, RevocationUrl, PkceCodeChallenge, Scope, reqwest::async_http_client, PkceCodeVerifier};
+use axum::{extract::{Query, State, FromRef}};
+use oauth2::{url::Url, AuthorizationCode, CsrfToken, AuthUrl, TokenUrl, basic::{BasicClient, BasicTokenType}, ClientId, ClientSecret, RedirectUrl, RevocationUrl, PkceCodeChallenge, Scope, reqwest::async_http_client, PkceCodeVerifier, StandardTokenResponse, EmptyExtraTokenFields};
 use anyhow::{Result};
 use serde::Deserialize;
 use tokio::{sync::oneshot::{channel, Sender}, time::sleep};
@@ -61,22 +61,9 @@ fn new_oauth_client(
 }
 
 
-struct AuthSession {
-    pkce_code_verifier: Option<PkceCodeVerifier>,
-    // creation_time: Instant,
-    client: Weak<BasicClient>
-}
-
-
-struct InitiatedAuth {
-    url: Url,
-    session: AuthSession,
-    csrf_token: CsrfToken
-}
-
-
 #[derive(Clone)]
 pub struct OAuth<const PKCE: bool> {
+    oauth_state: OAuthState,
     client: Arc<BasicClient>
 }
 
@@ -87,9 +74,11 @@ impl<const PKCE: bool> OAuth<PKCE> {
         token_url: String,
         client_id: String,
         client_secret: String,
-        revocation_url: Option<String>
+        revocation_url: Option<String>,
+        oauth_state: OAuthState
     ) -> OAuth<PKCE> {
         Self {
+            oauth_state,
             client: Arc::new(new_oauth_client(
                 auth_url,
                 token_url,
@@ -101,7 +90,12 @@ impl<const PKCE: bool> OAuth<PKCE> {
         }
     }
 
-    fn initiate_auth(&self, scopes: impl IntoIterator<Item=impl Into<String>>) -> InitiatedAuth {
+    /// Initiates an OAuth attempt with the given scopes
+    /// 
+    /// Returns a tuple with the authorization Url to give to the user, and a
+    /// future that resolves to Some(token) where token is the OAuth token, or
+    /// None if authentication timed out or failed
+    pub fn initiate_auth(&self, scopes: impl IntoIterator<Item=impl Into<String>>) -> (Url, impl Future<Output=Option<OAuthToken>>) {
         let mut auth_request = self.client.authorize_url(CsrfToken::new_random);
 
         for scope in scopes {
@@ -120,24 +114,41 @@ impl<const PKCE: bool> OAuth<PKCE> {
             auth_request
         }.url();
         
-        let session = AuthSession {
+        let (ready_sender, receiver) = channel();
+
+        let oauth_state = self.oauth_state.clone();
+        let untracker = oauth_state.track_session(
+            csrf_token,
             pkce_code_verifier,
-            // creation_time: Instant::now(),
-            client: Arc::downgrade(&self.client)
+            self.client.clone(),
+            ready_sender
+        );
+
+        let fut = async move {
+            let _untracker = untracker;
+
+            tokio::select! {
+                res = receiver => {
+                    res.ok()
+                },
+                () = sleep(MAX_AUTH_WAIT_TIME) => {
+                    None
+                }
+            }
         };
 
-        InitiatedAuth {
-            session,
-            url: authorize_url,
-            csrf_token
-        }
+        (authorize_url, fut)
     }
 }
 
 
+type OAuthToken = StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>;
+
+
 struct PendingSession {
-    session: AuthSession,
-    ready_sender: Sender<()>
+    ready_sender: Sender<OAuthToken>,
+    pkce_code_verifier: Option<PkceCodeVerifier>,
+    client: Arc<BasicClient>,
 }
 
 
@@ -147,15 +158,40 @@ pub struct OAuthState {
 }
 
 
+struct Untracker {
+    oauth_state: OAuthState,
+    csrf_token: CsrfToken
+}
+
+
+impl Drop for Untracker {
+    fn drop(&mut self) {
+        self.oauth_state.untrack_session(&self.csrf_token);
+    }
+}
+
+
 impl OAuthState {
-    fn track_session(&self, csrf_token: &CsrfToken, session: AuthSession, ready_sender: Sender<()>) {
+    fn track_session(
+        &self,
+        csrf_token: CsrfToken, 
+        pkce_code_verifier: Option<PkceCodeVerifier>,
+        client: Arc<BasicClient>,
+        ready_sender: Sender<OAuthToken>
+    ) -> Untracker {
         self.pending_auths.lock().insert(
             csrf_token.secret().clone(),
             PendingSession {
-                session,
-                ready_sender
+                ready_sender,
+                pkce_code_verifier,
+                client
             }
         );
+
+        Untracker {
+            oauth_state: self.clone(),
+            csrf_token
+        }
     }
 
     fn untrack_session(&self, csrf_token: &CsrfToken) {
@@ -169,17 +205,11 @@ impl OAuthState {
             return Html(include_str!("../static/late_auth.html"))
         };
 
-        let client = match pending
-            .session
-            .client
-            .upgrade() {
-                Some(x) => x,
-                None => return Html(include_str!("../static/internal_error.html"))
-            };
+        let client = pending.client;
         
         let mut request = client.exchange_code(auth_code);
 
-        if let Some(pkce_code_verifier) = pending.session.pkce_code_verifier {
+        if let Some(pkce_code_verifier) = pending.pkce_code_verifier {
             request = request.set_pkce_verifier(pkce_code_verifier);
         }
 
@@ -197,7 +227,7 @@ impl OAuthState {
                 }
             };
 
-        let _ = pending.ready_sender.send(());
+        let _ = pending.ready_sender.send(token);
         Html(include_str!("../static/successful_auth.html"))
     }
 }
@@ -223,7 +253,7 @@ impl<T: OAuthStateContainer> FromRef<T> for OAuthState {
 
 
 #[axum::debug_handler]
-pub async fn _oauth_redirect(
+pub async fn oauth_redirect_handler(
     Query(AuthRedirectParams { state, code }): Query<AuthRedirectParams>,
     State(oauth_state): State<OAuthState>
 ) -> Html<&'static str> {
@@ -237,55 +267,12 @@ pub async fn _oauth_redirect(
 #[macro_export]
 macro_rules! oauth_redirect {
     () => {
-        crate::axum::routing::get(mangle_api_core::auth::oauth2::_oauth_redirect)
+        $crate::axum::routing::get($crate::auth::oauth2::oauth_redirect_handler)
     };
 }
 
 
 pub use oauth_redirect;
-
-
-pub fn initiate_oauth<const PKCE: bool>(
-    ws: WebSocketUpgrade,
-    oauth_state: OAuthState,
-    client: OAuth<PKCE>,
-    scopes: impl IntoIterator<Item=impl Into<String>> + Send + 'static
-) -> Response {
-    ws.on_upgrade(async move |mut ws| {
-        let (sender, receiver) = channel();
-        
-        let init = client.initiate_auth(scopes);
-        let url = init.url;
-
-        oauth_state.track_session(
-            &init.csrf_token,
-            init.session,
-            sender
-        );
-
-        if ws.send(Message::Text(url.to_string())).await.is_err() {
-            return
-        }
-
-        tokio::select! {
-            () = async {
-                loop {
-                    if ws.recv().await.is_none() {
-                        break
-                    }
-                }
-            } => { }
-
-            () = sleep(MAX_AUTH_WAIT_TIME) => { }
-            
-            res = receiver => if let Ok(_x) = res {
-                let _ = ws.send(Message::Text("authed".into())).await;
-            } else { }
-        }
-
-        oauth_state.untrack_session(&init.csrf_token);
-    })
-}
 
 
 pub mod google {
@@ -307,7 +294,8 @@ pub mod google {
     }
 
     pub fn new_google_oauth_from_file(
-        filename: impl AsRef<Path>
+        filename: impl AsRef<Path>,
+        oauth_state: OAuthState
     ) -> Result<GoogleOAuth> {
         #[derive(Deserialize, Debug)]
         struct ClientSecret {
@@ -330,24 +318,11 @@ pub mod google {
                 secrets.token_uri,
                 secrets.client_id,
                 secrets.client_secret,
-                Some("https://oauth2.googleapis.com/revoke".to_string())
+                Some("https://oauth2.googleapis.com/revoke".to_string()),
+                oauth_state
             )
         )
     }
-
-    // #[axum::debug_handler]
-    // pub async fn initiate_google_auth(
-    //     ws: WebSocketUpgrade,
-    //     State(oauth_state): State<OAuthState>,
-    //     State(client): State<GoogleOAuth>
-    // ) -> Response {
-    //     initiate_oauth(
-    //         ws,
-    //         oauth_state,
-    //         client,
-    //         GOOGLE_PROFILE_SCOPES
-    //     )
-    // }
 }
 
 
@@ -370,7 +345,8 @@ pub mod github {
     }
 
     pub fn new_github_oauth_from_file(
-        filename: impl AsRef<Path>
+        filename: impl AsRef<Path>,
+        oauth_state: OAuthState
     ) -> Result<GithubOAuth> {
         #[derive(Deserialize, Debug)]
         struct ClientSecret {
@@ -386,7 +362,8 @@ pub mod github {
                 "https://github.com/login/oauth/access_token".to_string(),
                 secrets.client_id,
                 secrets.client_secret,
-                None
+                None,
+                oauth_state
             )
         )
     }

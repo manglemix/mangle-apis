@@ -7,7 +7,6 @@ use mangle_api_core::{
         OAuthState,
         google::{GoogleOAuth, new_google_oauth_from_file, GAuthContainer},
         github::{GithubOAuth, new_github_oauth_from_file, GithubOAuthContainer},
-        initiate_oauth,
         GOOGLE_PROFILE_SCOPES,
         OAuthStateContainer,
         oauth_redirect
@@ -15,11 +14,10 @@ use mangle_api_core::{
     pre_matches,
     get_pipe_name,
     axum::{
-        self,
-        extract::{State, WebSocketUpgrade},
+        extract::{State, WebSocketUpgrade, ws::Message},
         routing::get,
         response::Response
-    }
+    }, ws::PolledWebSocket
 };
 
 mod config;
@@ -71,18 +69,37 @@ async fn main() -> anyhow::Result<()> {
         return Ok(())
     };
 
+    let oauth_state: OAuthState = Default::default();
     let state = GlobalState {
-        oauth_state: Default::default(),
-        gclient: new_google_oauth_from_file(&config.google_client_secret_path)?,
-        github_client: new_github_oauth_from_file(&config.github_client_secret_path)?
+        gclient: new_google_oauth_from_file(&config.google_client_secret_path, oauth_state.clone())?,
+        github_client: new_github_oauth_from_file(&config.github_client_secret_path, oauth_state.clone())?,
+        oauth_state
     };
 
     async fn test_oauth(
         ws: WebSocketUpgrade,
-        State(oauth_state): State<OAuthState>,
         State(client): State<GoogleOAuth>
     ) -> Response {
-        initiate_oauth(ws, oauth_state, client, GOOGLE_PROFILE_SCOPES)
+        ws.on_upgrade(|mut ws| async move {
+            let (url, fut) = client.initiate_auth(GOOGLE_PROFILE_SCOPES);
+            
+            if ws.send(Message::Text(url.to_string())).await.is_err() {
+                return
+            }
+
+            let polled = PolledWebSocket::new(ws);
+            let opt = fut.await;
+            let mut ws = match polled.lock().await {
+                Some(ws) => ws,
+                None => return
+            };
+
+            let _ = if let Some(_token) = opt {
+                ws.send(Message::Text("authed".into()))
+            } else {
+                ws.send(Message::Text("auth failed".into()))
+            }.await;
+        })
     }
 
     start_api(
@@ -91,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
         pipe_name,
         config,
         [
-            "^/oauth",
+            "^/oauth/redirect$",
             "^/gauth$"
         ],
         [

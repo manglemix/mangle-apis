@@ -6,6 +6,7 @@ use axum::routing::MethodRouter;
 use axum::Router;
 
 pub mod auth;
+pub mod ws;
 
 use anyhow::{Result, Context, Error};
 use clap::builder::IntoResettable;
@@ -157,9 +158,20 @@ pub async fn pre_matches<Config: DeserializeOwned>(app: Command, pipe_name: &OsS
         }
     }
 
-    from_str(&read_to_string(&config_path)?)
-        .map_err(Into::<anyhow::Error>::into)
-        .context(format!("Reading configuration file: {config_path}"))
+    macro_rules! err {
+        () => {
+            |e| {
+                Into::<anyhow::Error>::into(e)
+                    .context(format!("Reading configuration file: {config_path}"))
+            }
+        };
+    }
+
+    from_str(
+        &read_to_string(&config_path)
+            .map_err(err!())?
+    )
+        .map_err(err!())
         .map(Option::Some)
 }
 
