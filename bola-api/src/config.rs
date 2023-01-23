@@ -24,7 +24,8 @@ pub struct Config {
     pub google_client_secret_path: String,
     pub github_client_secret_path: String,
     pub api_token: String,
-    pub redis_cluster_addrs: Vec<String>
+    pub redis_cluster_addrs: Vec<String>,
+    pub token_duration: u16
 }
 
 

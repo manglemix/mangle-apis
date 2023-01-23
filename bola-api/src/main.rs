@@ -1,35 +1,47 @@
+use std::time::Duration;
+
 use mangle_api_core::{
     make_app,
     start_api,
     anyhow,
     tokio,
-    auth::oauth2::{
+    auth::{oauth2::{
         OAuthState,
         google::{GoogleOAuth, new_google_oauth_from_file, GAuthContainer},
         github::{GithubOAuth, new_github_oauth_from_file, GithubOAuthContainer},
-        GOOGLE_PROFILE_SCOPES,
         OAuthStateContainer,
         oauth_redirect
-    },
+    }},
     pre_matches,
     get_pipe_name,
     axum::{
-        extract::{State, WebSocketUpgrade, ws::Message},
+        extract::{FromRef},
         routing::get,
-        response::Response
-    }, ws::PolledWebSocket
+    }
 };
 
 mod config;
+mod users;
 
 use config::Config;
+use users::{login, UserTokens};
+
+use crate::users::UserToken;
 
 
 #[derive(Clone)]
 struct GlobalState {
     oauth_state: OAuthState,
     gclient: GoogleOAuth,
-    github_client: GithubOAuth
+    github_client: GithubOAuth,
+    user_tokens: UserTokens
+}
+
+
+impl FromRef<GlobalState> for UserTokens {
+    fn from_ref(input: &GlobalState) -> Self {
+        input.user_tokens.clone()
+    }
 }
 
 
@@ -73,33 +85,12 @@ async fn main() -> anyhow::Result<()> {
     let state = GlobalState {
         gclient: new_google_oauth_from_file(&config.google_client_secret_path, oauth_state.clone())?,
         github_client: new_github_oauth_from_file(&config.github_client_secret_path, oauth_state.clone())?,
-        oauth_state
+        oauth_state,
+        user_tokens: UserTokens::new(Duration::from_secs(config.token_duration as u64))
     };
 
-    async fn test_oauth(
-        ws: WebSocketUpgrade,
-        State(client): State<GoogleOAuth>
-    ) -> Response {
-        ws.on_upgrade(|mut ws| async move {
-            let (url, fut) = client.initiate_auth(GOOGLE_PROFILE_SCOPES);
-            
-            if ws.send(Message::Text(url.to_string())).await.is_err() {
-                return
-            }
-
-            let polled = PolledWebSocket::new(ws);
-            let opt = fut.await;
-            let mut ws = match polled.lock().await {
-                Some(ws) => ws,
-                None => return
-            };
-
-            let _ = if let Some(_token) = opt {
-                ws.send(Message::Text("authed".into()))
-            } else {
-                ws.send(Message::Text("auth failed".into()))
-            }.await;
-        })
+    async fn test_token(_token: UserToken) -> String {
+        "hello!".into()
     }
 
     start_api(
@@ -108,12 +99,12 @@ async fn main() -> anyhow::Result<()> {
         pipe_name,
         config,
         [
-            "^/oauth/redirect$",
-            "^/gauth$"
+            "^/oauth/redirect$"
         ],
         [
             ("/oauth/redirect", oauth_redirect!()),
-            ("/gauth", get(test_oauth))
+            ("/login", get(login)),
+            ("/test", get(test_token))
         ]
     ).await
 }
