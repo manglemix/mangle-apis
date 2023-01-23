@@ -6,5 +6,4 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-mangle-api-core = { path = "../mangle-api-core" }
-redis = { version = "0.22.1", features = ["cluster", "ahash", "tokio-comp", "connection-manager"] }
+mangle-api-core = { path = "../mangle-api-core", features = ["redis"] }

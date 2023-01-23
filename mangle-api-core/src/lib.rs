@@ -8,6 +8,9 @@ use axum::{Router, Server};
 pub mod auth;
 pub mod ws;
 
+#[cfg(any(feature = "redis"))]
+pub mod db;
+
 use anyhow::{Result, Context, Error};
 use clap::builder::IntoResettable;
 use clap::{Command, arg};
@@ -44,6 +47,8 @@ pub use serde;
 pub use toml;
 pub use tower_http;
 pub use parking_lot;
+#[cfg(any(feature = "redis"))]
+pub use redis;
 
 
 mod log_targets {

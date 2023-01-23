@@ -1,6 +1,5 @@
 use std::{time::Duration, mem::take};
 
-use db::DBClient;
 use mangle_api_core::{
     make_app,
     start_api,
@@ -18,15 +17,16 @@ use mangle_api_core::{
     axum::{
         extract::{FromRef},
         routing::get,
-    }
+    },
+    db::redis::RedisClient,
+    redis
 };
 
 mod config;
-mod db;
 mod users;
 
 use config::Config;
-use users::{login, UserTokens};
+use users::{login, UserProfileTokens};
 
 
 #[derive(Clone)]
@@ -34,19 +34,19 @@ struct GlobalState {
     oauth_state: OAuthState,
     gclient: GoogleOAuth,
     github_client: GithubOAuth,
-    user_tokens: UserTokens,
-    db_client: DBClient
+    user_tokens: UserProfileTokens,
+    db_client: RedisClient
 }
 
 
-impl FromRef<GlobalState> for DBClient {
+impl FromRef<GlobalState> for RedisClient {
     fn from_ref(input: &GlobalState) -> Self {
         input.db_client.clone()
     }
 }
 
 
-impl FromRef<GlobalState> for UserTokens {
+impl FromRef<GlobalState> for UserProfileTokens {
     fn from_ref(input: &GlobalState) -> Self {
         input.user_tokens.clone()
     }
@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(())
     };
 
-    let db_client = DBClient::new(
+    let db_client = RedisClient::new(
         take(&mut config.redis_cluster_addrs),
         take(&mut config.redis_username),
         take(&mut config.redis_password)
@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
         gclient: new_google_oauth_from_file(&config.google_client_secret_path, oauth_state.clone())?,
         github_client: new_github_oauth_from_file(&config.github_client_secret_path, oauth_state.clone())?,
         oauth_state,
-        user_tokens: UserTokens::new(Duration::from_secs(config.token_duration as u64)),
+        user_tokens: UserProfileTokens::new(Duration::from_secs(config.token_duration as u64)),
         db_client
     };
 

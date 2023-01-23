@@ -142,7 +142,7 @@ impl<const PKCE: bool> OAuth<PKCE> {
 }
 
 
-type OAuthToken = StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>;
+pub type OAuthToken = StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>;
 
 
 struct PendingSession {
