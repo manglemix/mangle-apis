@@ -1,9 +1,10 @@
-use std::time::Duration;
+use std::{time::Duration, mem::take};
 
+use db::DBClient;
 use mangle_api_core::{
     make_app,
     start_api,
-    anyhow,
+    anyhow::{self, Error, Context},
     tokio,
     auth::{oauth2::{
         OAuthState,
@@ -21,12 +22,11 @@ use mangle_api_core::{
 };
 
 mod config;
+mod db;
 mod users;
 
 use config::Config;
 use users::{login, UserTokens};
-
-use crate::users::UserToken;
 
 
 #[derive(Clone)]
@@ -34,7 +34,15 @@ struct GlobalState {
     oauth_state: OAuthState,
     gclient: GoogleOAuth,
     github_client: GithubOAuth,
-    user_tokens: UserTokens
+    user_tokens: UserTokens,
+    db_client: DBClient
+}
+
+
+impl FromRef<GlobalState> for DBClient {
+    fn from_ref(input: &GlobalState) -> Self {
+        input.db_client.clone()
+    }
 }
 
 
@@ -77,21 +85,26 @@ async fn main() -> anyhow::Result<()> {
 
     let pipe_name = get_pipe_name("BOLA_PIPE_NAME", "bola_pipe");
 
-    let Some(config) = pre_matches::<Config>(app.clone(), &pipe_name).await? else {
+    let Some(mut config) = pre_matches::<Config>(app.clone(), &pipe_name).await? else {
         return Ok(())
     };
+
+    let db_client = DBClient::new(
+        take(&mut config.redis_cluster_addrs),
+        take(&mut config.redis_username),
+        take(&mut config.redis_password)
+    )
+        .map_err(Into::<Error>::into)
+        .context("Parsing redis_cluster_addrs")?;
 
     let oauth_state: OAuthState = Default::default();
     let state = GlobalState {
         gclient: new_google_oauth_from_file(&config.google_client_secret_path, oauth_state.clone())?,
         github_client: new_github_oauth_from_file(&config.github_client_secret_path, oauth_state.clone())?,
         oauth_state,
-        user_tokens: UserTokens::new(Duration::from_secs(config.token_duration as u64))
+        user_tokens: UserTokens::new(Duration::from_secs(config.token_duration as u64)),
+        db_client
     };
-
-    async fn test_token(_token: UserToken) -> String {
-        "hello!".into()
-    }
 
     start_api(
         state,
@@ -104,7 +117,6 @@ async fn main() -> anyhow::Result<()> {
         [
             ("/oauth/redirect", oauth_redirect!()),
             ("/login", get(login)),
-            ("/test", get(test_token))
         ]
     ).await
 }

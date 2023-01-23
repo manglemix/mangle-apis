@@ -1,4 +1,4 @@
-use std::{collections::{HashMap}, sync::Arc, time::Duration, ops::Deref, marker::PhantomData, mem::take, hash::Hash};
+use std::{collections::{HashMap}, sync::Arc, time::Duration, ops::Deref, marker::PhantomData, hash::Hash};
 
 use axum::{http::{HeaderValue, StatusCode, request::Parts}, extract::{FromRequestParts, FromRef}, async_trait};
 use parking_lot::Mutex;

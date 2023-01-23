@@ -1,7 +1,7 @@
 use axum::http::{HeaderValue};
 use mangle_api_core::serde::Deserialize;
 use mangle_api_core::tower_http::cors::{AllowMethods, AllowOrigin};
-use mangle_api_core::{axum,  BaseConfig};
+use mangle_api_core::{axum,  BaseConfig, BindAddress};
 
 
 #[derive(Deserialize)]
@@ -21,11 +21,17 @@ pub struct Config {
     cors_allowed_methods: Vec<String>,
     #[serde(default = "Default::default")]
     cors_allowed_origins: Vec<String>,
+    
     pub google_client_secret_path: String,
     pub github_client_secret_path: String,
+
     pub api_token: String,
+
     pub redis_cluster_addrs: Vec<String>,
-    pub token_duration: u16
+    pub redis_username: String,
+    pub redis_password: String,
+
+    pub token_duration: u16,
 }
 
 
@@ -70,8 +76,11 @@ impl BaseConfig for Config {
         self.api_token.parse().map_err(Into::into)
     }
 
-    fn get_bind_address(&self) -> mangle_api_core::anyhow::Result<std::net::SocketAddr> {
-        format!("{}:{}", &self.server_address, self.server_port).parse().map_err(Into::into)
+    fn get_bind_address(&self) -> mangle_api_core::anyhow::Result<BindAddress> {
+        format!("{}:{}", &self.server_address, self.server_port)
+            .parse()
+            .map_err(Into::into)
+            .map(BindAddress::Network)
     }
 }
 

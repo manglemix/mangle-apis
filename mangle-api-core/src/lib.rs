@@ -3,7 +3,7 @@
 
 use axum::http::HeaderValue;
 use axum::routing::MethodRouter;
-use axum::Router;
+use axum::{Router, Server};
 
 pub mod auth;
 pub mod ws;
@@ -43,6 +43,7 @@ pub use anyhow;
 pub use serde;
 pub use toml;
 pub use tower_http;
+pub use parking_lot;
 
 
 mod log_targets {
@@ -96,6 +97,12 @@ pub fn make_app<const N: usize>(
 }
 
 
+pub enum BindAddress {
+    Local(String),
+    Network(SocketAddr)
+}
+
+
 pub trait BaseConfig {
     fn get_stderr_log_path(&self) -> Result<&Path>;
     fn get_routing_log_path(&self) -> Result<&Path>;
@@ -103,7 +110,7 @@ pub trait BaseConfig {
     fn get_cors_allowed_methods(&self) -> Result<AllowMethods>;
     fn get_cors_allowed_origins(&self) -> Result<AllowOrigin>;
     fn get_api_token(&self) -> Result<HeaderValue>;
-    fn get_bind_address(&self) -> Result<SocketAddr>;
+    fn get_bind_address(&self) -> Result<BindAddress>;
 }
 
 
@@ -293,105 +300,132 @@ where
                 )
         );
 
-    // Setup Server
-    let addr = config.get_bind_address()?;
-    let server = axum::Server::bind(&addr);
-    
-    info!("Binded to {:?}", addr);
-
-    // Only print criticals from now on
-    *CRITICAL_LOG_LEVEL.lock() = LevelFilter::Error;
-
-    // Free some memory
-    drop((config, addr, pipe_name));
-
-    // Main tasks
-    // 1. Axum server
-    // 2. Ctrl-C
-    // 3. Console Server
+    // Setup side functionality
     let mut final_event = None;
-    tokio::select!{
-        e = server.serve(router.into_make_service()) => {
-            if !e.is_err() {
-                error!("axum Server closed without error!?")
+    let fut = async {
+        tokio::select! {
+            res = tokio::signal::ctrl_c() => {
+                if let Err(e) = res {
+                    error!("Faced the following error while listening for ctrl_c: {:?}", e);
+                } else {
+                    warn!("Ctrl-C received");
+                }
             }
-            e?
-        }
-        
-        e = tokio::signal::ctrl_c() => {
-            warn!("Ctrl-C received");
-            e?
-        },
-
-        () = async {
-			loop {
-				let mut event = match console_server.accept().await {
-					Ok(x) => x,
-					Err(e) => {
-						error!("Received IOError while listening on ConsoleServer {e:?}");
-						continue
-					}
-				};
-				let message = event.take_message();
-
-				let matches = match app.clone().try_get_matches_from(message.split_whitespace()) {
-					Ok(x) => x,
-					Err(e) => {
-						error!("Failed to parse client console message {message}. Error: {e:?}");
-						continue
-					}
-				};
-
-				macro_rules! write_all {
-					($msg: expr) => {
-						match event.write_all($msg).await {
-							Ok(()) => {}
-							Err(e) => {
-                                error!("Failed to respond to client console {e:?}");
-								continue
-							}
-						}
-					}
-				}
-
-				match matches.subcommand().unwrap() {
-					("log_level", matches) => match matches.get_one::<String>("new_level") {
-                        Some(new_level) => {
-                            let new_level = match new_level.parse() {
-                                Ok(x) => x,
+            () = async {
+                loop {
+                    let mut event = match console_server.accept().await {
+                        Ok(x) => x,
+                        Err(e) => {
+                            error!("Received IOError while listening on ConsoleServer {e:?}");
+                            continue
+                        }
+                    };
+                    let message = event.take_message();
+    
+                    let matches = match app.clone().try_get_matches_from(message.split_whitespace()) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            error!("Failed to parse client console message {message}. Error: {e:?}");
+                            continue
+                        }
+                    };
+    
+                    macro_rules! write_all {
+                        ($msg: expr) => {
+                            match event.write_all($msg).await {
+                                Ok(()) => {}
                                 Err(e) => {
-                                    error!("Failed to parse new_level: {e:?}");
-                                    write_all!(format!("Failed to parse new_level: {e:?}").as_str());
+                                    error!("Failed to respond to client console {e:?}");
                                     continue
                                 }
-                            };
-
-                            match matches.get_one::<String>("target").unwrap().as_str() {
-                                "stderr" => *STDERR_LOG_LEVEL.lock() = new_level,
-                                "routing" => *ROUTING_LOG_LEVEL.lock() = new_level,
+                            }
+                        }
+                    }
+    
+                    match matches.subcommand().unwrap() {
+                        ("log_level", matches) => match matches.get_one::<String>("new_level") {
+                            Some(new_level) => {
+                                let new_level = match new_level.parse() {
+                                    Ok(x) => x,
+                                    Err(e) => {
+                                        error!("Failed to parse new_level: {e:?}");
+                                        write_all!(format!("Failed to parse new_level: {e:?}").as_str());
+                                        continue
+                                    }
+                                };
+    
+                                match matches.get_one::<String>("target").unwrap().as_str() {
+                                    "stderr" => *STDERR_LOG_LEVEL.lock() = new_level,
+                                    "routing" => *ROUTING_LOG_LEVEL.lock() = new_level,
+                                    _ => write_all!("Unrecognized target")
+                                }
+                            }
+                            None => match matches.get_one::<String>("target").unwrap().as_str() {
+                                "stderr" => write_all!(STDERR_LOG_LEVEL.lock().to_string().to_lowercase().as_str()),
+                                "routing" => write_all!(ROUTING_LOG_LEVEL.lock().to_string().to_lowercase().as_str()),
                                 _ => write_all!("Unrecognized target")
                             }
                         }
-                        None => match matches.get_one::<String>("target").unwrap().as_str() {
-                            "stderr" => write_all!(STDERR_LOG_LEVEL.lock().to_string().to_lowercase().as_str()),
-                            "routing" => write_all!(ROUTING_LOG_LEVEL.lock().to_string().to_lowercase().as_str()),
-                            _ => write_all!("Unrecognized target")
+                        ("status", _) => write_all!("Server is good!"),
+                        ("stop", _) => {
+                            final_event = Some(event);
+                            warn!("Stop command issued");
+                            break
+                        }
+                        (cmd, _) => {
+                            error!("Received the following unrecognized command from client console: {cmd}");
+                            write_all!("Unrecognized command: {cmd}")
                         }
                     }
-					("status", _) => write_all!("Server is good!"),
-					("stop", _) => {
-						final_event = Some(event);
-						warn!("Stop command issued");
-						return
-					}
-					(cmd, _) => {
-						error!("Received the following unrecognized command from client console: {cmd}");
-                        write_all!("Unrecognized command: {cmd}")
-					}
-				}
-			}
-		} => {}
+                }
+            } => {}
+        }
+    };
+
+    macro_rules! run {
+        ($server: expr, $addr: expr) => {
+            let server = $server
+                .serve(router.into_make_service())
+                .with_graceful_shutdown(fut);
+            
+            info!("Binded to {:?}", $addr);
+
+            // Only print criticals from now on
+            *CRITICAL_LOG_LEVEL.lock() = LevelFilter::Error;
+
+            // Free some memory
+            drop((config, pipe_name));
+
+            server
+                .await
+                .map_err(Into::<Error>::into)
+                .context("Running the web server")?;
+        };
     }
+
+    // Setup Server
+    match config
+        .get_bind_address()
+        .map_err(Into::<Error>::into)
+        .context("Parsing bind address")?
+    {
+        #[cfg(unix)]
+        BindAddress::Local(addr) => {
+            let listener = tokio::net::UnixListener::bind(&addr)
+                .map_err(Into::<Error>::into)
+                .context("Binding to local address")?;
+            let stream = tokio_stream::wrappers::UnixListenerStream::new(listener);
+            let acceptor = hyper::server::accept::from_stream(stream);
+            run!(Server::builder(acceptor), addr);
+        }
+        #[cfg(not(unix))]
+        BindAddress::Local(_) => {
+            return Err(Error::msg("Local Sockets are only supported on Unix"))
+        }
+        BindAddress::Network(addr) => {
+            run!(Server::bind(&addr), addr);
+        }
+    };
     
 	if let Some(mut event) = final_event {
         event.write_all("Server stopped successfully").await?

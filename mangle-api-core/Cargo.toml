@@ -6,9 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1.23.0", features = ["fs", "rt", "signal", "macros"] }
+tokio = { version = "1.23.0", features = ["fs", "rt", "signal", "macros", "net"] }
+tokio-stream = { version = "0.1.11", features = ["net"] }
 anyhow = "1.0.68"
 
+hyper = "0.14.23"
 tower = { version = "0.4.13" }
 tower-http = { version = "0.3.5", features = ["cors", "compression-gzip", "compression-br", "trace", "auth"] }
 axum = { version = "0.6.1", features = ["http2", "ws", "headers", "macros"] }
