@@ -45,7 +45,7 @@ pub struct RedisClient {
 
 
 impl RedisClient {
-    pub fn new(nodes: Vec<String>, username: String, password: String) -> RedisResult<Self>{
+    pub fn new(nodes: Vec<String>, _username: String, _password: String) -> RedisResult<Self>{
         ClusterClientBuilder::new(nodes)
             // .password(password)
             // .username(username)
