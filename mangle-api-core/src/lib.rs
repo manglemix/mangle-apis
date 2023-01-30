@@ -7,6 +7,8 @@ use axum::{Router, Server};
 
 pub mod auth;
 pub mod ws;
+pub mod sync;
+pub mod utils;
 
 #[cfg(any(feature = "redis"))]
 pub mod db;

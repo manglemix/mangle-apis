@@ -1,5 +1,5 @@
 [workspace]
 members = [
     "mangle-api-core",
-    "bola-api"
+    "bola-api",
 ]
