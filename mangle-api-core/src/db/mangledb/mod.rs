@@ -62,45 +62,6 @@ impl MangleDB {
         })
     }
 
-    fn own_record(&self, namespace: impl AsRef<str>, name: impl Into<String>) -> Result<(), OwnError> {
-        let namespace = namespace.as_ref();
-        let name = name.into();
-
-        if self.persy.one::<_, ByteVec>(namespace, &name)?.is_none() {
-            return Err(OwnError::UnrecognizedName)
-        }
-
-        self.inner
-            .namespaces
-            .iter()
-            .find_map(move |x| {
-                if x.namespace == namespace {
-                    x.owned_names.write().insert(name);
-                    Some(())
-                } else {
-                    None
-                }
-            })
-            .ok_or(OwnError::UnrecognizedNamespace)
-    }
-
-    fn is_record_owned(&self, namespace: impl AsRef<str>, name: impl AsRef<str>) -> bool {
-        let namespace = namespace.as_ref();
-        let name = name.as_ref();
-
-        self.inner
-            .namespaces
-            .iter()
-            .find_map(|x| {
-                if x.namespace == namespace {
-                    Some(x.owned_names.read().contains(name))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default()
-    }
-
     pub fn checked_write_record(&self, namespace: impl Into<String>, name: impl Into<String>, data: Vec<u8>) -> Result<(), WriteError> {
         let namespace = namespace.into();
         let name = name.into();
@@ -133,13 +94,6 @@ impl MangleDB {
         }
 
         todo!("request ownership")
-    }
-
-    fn write_record(&self, namespace: &str, name: String, data: Vec<u8>) -> Result<(), WriteError> {
-        let mut tx = self.persy.begin()?;
-        tx.put(namespace, name, ByteVec::new(data))
-            .map_err(WriteError::insert_error)?;
-        tx.commit().map_err(Into::into)
     }
 
     pub fn read_record<T: FromBytes>(&self, namespace: impl AsRef<str>, name: impl Borrow<String>) -> Result<T, ReadError> {
@@ -196,5 +150,51 @@ impl MangleDB {
                     .write()
                     .remove(name);
             });
+    }
+
+    fn write_record(&self, namespace: &str, name: String, data: Vec<u8>) -> Result<(), WriteError> {
+        let mut tx = self.persy.begin()?;
+        tx.put(namespace, name, ByteVec::new(data))
+            .map_err(WriteError::insert_error)?;
+        tx.commit().map_err(Into::into)
+    }
+
+    fn own_record(&self, namespace: impl AsRef<str>, name: impl Into<String>) -> Result<(), OwnError> {
+        let namespace = namespace.as_ref();
+        let name = name.into();
+
+        if self.persy.one::<_, ByteVec>(namespace, &name)?.is_none() {
+            return Err(OwnError::UnrecognizedName)
+        }
+
+        self.inner
+            .namespaces
+            .iter()
+            .find_map(move |x| {
+                if x.namespace == namespace {
+                    x.owned_names.write().insert(name);
+                    Some(())
+                } else {
+                    None
+                }
+            })
+            .ok_or(OwnError::UnrecognizedNamespace)
+    }
+
+    fn is_record_owned(&self, namespace: impl AsRef<str>, name: impl AsRef<str>) -> bool {
+        let namespace = namespace.as_ref();
+        let name = name.as_ref();
+
+        self.inner
+            .namespaces
+            .iter()
+            .find_map(|x| {
+                if x.namespace == namespace {
+                    Some(x.owned_names.read().contains(name))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
     }
 }
