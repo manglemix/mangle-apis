@@ -2,4 +2,8 @@
 members = [
     "mangle-api-core",
     "bola-api",
+    "mangledb",
 ]
+
+[profile.release]
+lto = true

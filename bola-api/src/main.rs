@@ -1,9 +1,11 @@
-use std::{time::Duration, mem::take};
+use std::{time::Duration};
 
+use aws_config::load_from_env;
+use aws_sdk_dynamodb::{Client, model::AttributeValue};
 use mangle_api_core::{
     make_app,
     start_api,
-    anyhow::{self, Error, Context},
+    anyhow::{self},
     tokio,
     auth::{oauth2::{
         OAuthState,
@@ -18,8 +20,6 @@ use mangle_api_core::{
         extract::{FromRef},
         routing::get,
     },
-    db::redis::RedisClient,
-    redis
 };
 
 mod config;
@@ -35,14 +35,7 @@ struct GlobalState {
     gclient: GoogleOAuth,
     github_client: GithubOAuth,
     user_tokens: UserProfileTokens,
-    db_client: RedisClient
-}
-
-
-impl FromRef<GlobalState> for RedisClient {
-    fn from_ref(input: &GlobalState) -> Self {
-        input.db_client.clone()
-    }
+    // db_client: RedisClient
 }
 
 
@@ -76,6 +69,10 @@ impl GithubOAuthContainer for GlobalState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let client = Client::new(&load_from_env().await);
+    println!("{:?}", client.get_item().set_table_name(Some("bola_profiles".into())).key("email", AttributeValue::S("test3".into())).send().await?);
+    return Ok(());
+
     let app = make_app(
         "BolaAPI",
         env!("CARGO_PKG_VERSION"),
@@ -85,17 +82,9 @@ async fn main() -> anyhow::Result<()> {
 
     let pipe_name = get_pipe_name("BOLA_PIPE_NAME", "bola_pipe");
 
-    let Some(mut config) = pre_matches::<Config>(app.clone(), &pipe_name).await? else {
+    let Some(config) = pre_matches::<Config>(app.clone(), &pipe_name).await? else {
         return Ok(())
     };
-
-    let db_client = RedisClient::new(
-        take(&mut config.redis_cluster_addrs),
-        take(&mut config.redis_username),
-        take(&mut config.redis_password)
-    )
-        .map_err(Into::<Error>::into)
-        .context("Parsing redis_cluster_addrs")?;
 
     let oauth_state: OAuthState = Default::default();
     let state = GlobalState {
@@ -103,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
         github_client: new_github_oauth_from_file(&config.github_client_secret_path, oauth_state.clone())?,
         oauth_state,
         user_tokens: UserProfileTokens::new(Duration::from_secs(config.token_duration as u64)),
-        db_client
+        // db_client
     };
 
     start_api(

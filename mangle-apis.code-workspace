@@ -7,7 +7,13 @@
 	"settings": {
 		"rust-analyzer.cargo.features": [
 			"redis",
-			"mangledb"
+		],
+		"runTerminalCommand.commands": [
+			{
+				"command": "cross build -p bola-api --release  --target x86_64-unknown-linux-gnu",
+				"auto": true,
+				"name": "Build BolaAPI Linux Release"
+			}
 		]
 	}
 }
