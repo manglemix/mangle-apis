@@ -9,3 +9,4 @@ edition = "2021"
 mangle-api-core = { path = "../mangle-api-core", features = [] }
 aws-sdk-dynamodb = "0.24.0"
 aws-config = "0.54.1"
+aws-sdk-cognitoidentityprovider = { git = "https://github.com/awslabs/aws-sdk-rust", branch = "main" }

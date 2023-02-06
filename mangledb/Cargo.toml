@@ -16,8 +16,8 @@ anyhow = "1.0.68"
 # axum = { version = "0.6.1", features = ["http2", "ws", "headers", "macros"] }
 
 serde = { version = "1.0.151" }
-toml = "0.5.10"
-serde_json = "1.0.91"
+# toml = "0.5.10"
+# serde_json = "1.0.91"
 
 log = "0.4"
 # chrono = "0.4.23"
