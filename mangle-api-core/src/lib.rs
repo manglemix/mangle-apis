@@ -1,6 +1,3 @@
-#![feature(iterator_try_collect)]
-#![feature(async_closure)]
-
 use axum::http::HeaderValue;
 use axum::routing::MethodRouter;
 use axum::{Router, Server};
@@ -15,6 +12,7 @@ pub mod db;
 use anyhow::{Result, Context, Error};
 use clap::builder::IntoResettable;
 use clap::{Command, arg};
+use derive_more::From;
 use mangle_detached_console::{send_message, ConsoleSendError};
 
 use mangle_detached_console::ConsoleServer;
@@ -33,8 +31,7 @@ use tower_http::{
 };
 use std::ffi::{OsString, OsStr};
 use std::fs::read_to_string;
-use std::net::SocketAddr;
-use std::path::Path;
+use std::net::{SocketAddr};
 use std::sync::Arc;
 use regex::{RegexSet, Regex};
 use std::env;
@@ -45,9 +42,11 @@ pub use tokio;
 pub use axum;
 pub use anyhow;
 pub use serde;
+pub use serde_json;
 pub use toml;
 pub use tower_http;
 pub use parking_lot;
+pub use derive_more;
 #[cfg(any(feature = "redis"))]
 pub use redis;
 
@@ -103,20 +102,21 @@ pub fn make_app<const N: usize>(
 }
 
 
+#[derive(From)]
 pub enum BindAddress {
     Local(String),
     Network(SocketAddr)
 }
 
 
-pub trait BaseConfig {
-    fn get_stderr_log_path(&self) -> Result<&Path>;
-    fn get_routing_log_path(&self) -> Result<&Path>;
-    fn get_suspicious_security_log_path(&self) -> Result<&Path>;
-    fn get_cors_allowed_methods(&self) -> Result<AllowMethods>;
-    fn get_cors_allowed_origins(&self) -> Result<AllowOrigin>;
-    fn get_api_token(&self) -> Result<HeaderValue>;
-    fn get_bind_address(&self) -> Result<BindAddress>;
+pub struct BaseConfig<A: Into<AllowMethods>, B: Into<AllowOrigin>, C: Into<BindAddress>> {
+    pub stderr_log_path: String,
+    pub routing_log_path: String,
+    pub suspicious_security_log_path: String,
+    pub cors_allowed_methods: A,
+    pub cors_allowed_origins: B,
+    pub api_token: HeaderValue,
+    pub bind_address: C,
 }
 
 
@@ -189,17 +189,26 @@ pub async fn pre_matches<Config: DeserializeOwned>(app: Command, pipe_name: &OsS
 }
 
 
-pub async fn start_api<State, Config, const N1: usize, const N2: usize>(
+pub async fn start_api<
+    State,
+    const N1: usize,
+    const N2: usize,
+    A,
+    B,
+    C
+>(
     state: State,
     app: Command,
     pipe_name: OsString,
-    config: Config,
+    config: BaseConfig<A, B, C>,
     public_paths: [&'static str; N1],
     routes: [(&'static str, MethodRouter<State>); N2]
 ) -> Result<()>
 where 
     State: Clone + Send + Sync + 'static,
-    Config: BaseConfig
+    A: Into<AllowMethods>,
+    B: Into<AllowOrigin>,
+    C: Into<BindAddress>
 {
     // Setup logger
     static CRITICAL_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
@@ -247,8 +256,8 @@ where
                     !non_stderr2.is_match(metadata.target()) && metadata.level() <= *STDERR_LOG_LEVEL.lock()
                 })
                 .chain(
-                    log_file(&config.get_stderr_log_path()?)
-                        .context(format!("Opening {:?}", config.get_stderr_log_path()))?
+                    log_file(&config.stderr_log_path)
+                        .context(format!("Opening {:?}", config.stderr_log_path))?
                 )
         )
         // Routing to file
@@ -258,8 +267,8 @@ where
                     routing_regex.is_match(metadata.target()) && metadata.level() <= *ROUTING_LOG_LEVEL.lock()
                 })
                 .chain(
-                    log_file(&config.get_routing_log_path()?)
-                        .context(format!("Opening {:?}", config.get_routing_log_path()))?
+                    log_file(&config.routing_log_path)
+                        .context(format!("Opening {:?}", config.routing_log_path))?
                 )
         )
         // Suspicious security to file (maybe more?)
@@ -269,8 +278,8 @@ where
                     metadata.target().starts_with(log_targets::SUSPICIOUS_SECURITY)
                 })
                 .chain(
-                    log_file(&config.get_suspicious_security_log_path()?)
-                        .context(format!("Opening {:?}", config.get_suspicious_security_log_path()))?
+                    log_file(&config.suspicious_security_log_path)
+                        .context(format!("Opening {:?}", config.suspicious_security_log_path))?
                 )
         )
         .apply()?;
@@ -293,13 +302,13 @@ where
                 .layer(CompressionLayer::new())
                 .layer(TraceLayer::new_for_http())
                 .layer(CorsLayer::new()
-                    .allow_methods(config.get_cors_allowed_methods()?)
-                    .allow_origin(config.get_cors_allowed_origins()?)
+                    .allow_methods(config.cors_allowed_methods)
+                    .allow_origin(config.cors_allowed_origins)
                 )
                 .layer(
                     RequireAuthorizationLayer::custom(
                         BearerAuth::new(
-                            config.get_api_token()?,
+                            config.api_token,
                             RegexSet::new(public_paths).expect("Parsing open paths for Bearer Auth")
                         )
                     )
@@ -326,7 +335,7 @@ where
                             continue
                         }
                     };
-                    let message = event.take_message();
+                    let message = event.take_message().unwrap();
     
                     let matches = match app.clone().try_get_matches_from(message.split_whitespace()) {
                         Ok(x) => x,
@@ -400,7 +409,7 @@ where
             *CRITICAL_LOG_LEVEL.lock() = LevelFilter::Error;
 
             // Free some memory
-            drop((config, pipe_name));
+            drop(pipe_name);
 
             server
                 .await
@@ -410,10 +419,7 @@ where
     }
 
     // Setup Server
-    match config
-        .get_bind_address()
-        .map_err(Into::<Error>::into)
-        .context("Parsing bind address")?
+    match config.bind_address.into()
     {
         #[cfg(unix)]
         BindAddress::Local(addr) => {
