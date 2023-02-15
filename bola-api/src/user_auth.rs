@@ -1,11 +1,9 @@
 use std::{sync::Arc, ops::Deref};
 
 use aws_types::SdkConfig;
-use aws_sdk_cognitoidentityprovider::{Client, model::AttributeType};
+use aws_sdk_cognitoidentityprovider::{Client, model::{AttributeType, UserStatusType}};
 // use itertools::Itertools;
-use mangle_api_core::{axum::{extract::{State, WebSocketUpgrade, ws::Message}, response::Response}, serde::{Deserialize, self}};
-use mangle_api_core::ws::WsExt;
-use mangle_api_core::serde_json::from_str;
+use mangle_api_core::{axum::{extract::{State}, http::StatusCode, Form}, serde::{Deserialize, self}, log::error};
 
 
 // #[derive(Error, Debug, Display)]
@@ -96,83 +94,80 @@ impl UserAuth {
 
 #[derive(Deserialize)]
 #[serde(crate="serde")]
-struct SignUpData {
+pub struct SignUpData {
     username: String,
     password: String,
-    email: String
+    email: String,
+    nickname: Option<String>
 }
 
 
-pub async fn sign_up(State(user_auth): State<UserAuth>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(|ws| async move {
-        let Some((ws, msg)) = ws.easy_recv().await else {
-            return
-        };
-        let username;
-
-        if let Message::Text(msg) = msg {
-            let Ok(SignUpData {
-                username: tmp,
-                password,
-                email
-            }) = from_str(&msg) else {
-                ws.safe_drop().await;
-                return
-            };
-
-            username = tmp;
-            
-            match user_auth.client
-                .sign_up()
-                .client_id(user_auth.client_id.deref())
-                .username(&username)
-                .password(password)
-                .user_attributes(
-                    AttributeType::builder()
-                        .name("email")
-                        .value(email)
-                        .build()
-                )
-                .send()
-                .await
-            {
-                Ok(resp) => if !resp.user_confirmed() {
-                    ws.final_send(Message::Text("Failed".into())).await;
-                    return
+pub async fn sign_up(
+    State(user_auth): State<UserAuth>,
+    Form(SignUpData {
+        username,
+        password,
+        email,
+        nickname
+    }): Form<SignUpData>
+) -> (StatusCode, String) {
+    if let Err(e) = user_auth.client
+        .sign_up()
+        .client_id(user_auth.client_id.deref())
+        .username(&username)
+        .password(password)
+        .user_attributes(
+            AttributeType::builder()
+                .name("email")
+                .value(email)
+                .build()
+        )
+        .user_attributes(
+            AttributeType::builder()
+                .name("nickname")
+                .value(nickname.as_ref().unwrap_or(&username))
+                .build()
+        )
+        .send()
+        .await
+    {
+        use aws_sdk_cognitoidentityprovider::error::SignUpErrorKind::*;
+        return match e.into_service_error().kind {
+            InvalidPasswordException(e) => (StatusCode::BAD_REQUEST, e.to_string()),
+            CodeDeliveryFailureException(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Message failed to deliver".into()),
+            UsernameExistsException(_) => match user_auth.client
+                    .admin_get_user()
+                    .username(&username)
+                    .user_pool_id("BolaUsers")
+                    .send()
+                    .await
+                {
+                    Ok(x) => if let Some(&UserStatusType::Unconfirmed) = x.user_status()
+                        {
+                            if let Err(e) = user_auth.client
+                                .admin_delete_user()
+                                .username(&username)
+                                .send()
+                                .await
+                            {
+                                error!(target: "user_auth", "{e:?}");
+                                (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+                            } else {
+                                (StatusCode::OK, String::new())
+                            }
+                        } else {
+                            (StatusCode::BAD_REQUEST, "Username exists".into())
+                        }
+                    Err(e) => {
+                        error!(target: "user_auth", "{e:?}");
+                        (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+                    }
                 }
-                Err(_) => {
-                    ws.safe_drop().await;
-                    return
-                }
+            e => {
+                error!(target: "user_auth", "{e:?}");
+                (StatusCode::INTERNAL_SERVER_ERROR, String::new())
             }
-        } else {
-            ws.safe_drop().await;
-            return
         }
-
-        // if user is confirmed, we wait for confirmation code
-        let Some((ws, msg)) = ws.easy_recv().await else {
-            return
-        };
-
-        if let Message::Text(msg) = msg {
-            match user_auth.client
-                .confirm_sign_up()
-                .client_id(user_auth.client_id.deref())
-                .username(&username)
-                .confirmation_code(msg)
-                .send()
-                .await
-            {
-                Ok(_) => {
-                    ws.final_send(Message::Text("Success".into())).await;
-                }
-                Err(_) => {
-                    ws.safe_drop().await;
-                }
-            }
-        } else {
-            ws.safe_drop().await;
-        }
-    })
+    }
+    (StatusCode::OK, String::new())
 }

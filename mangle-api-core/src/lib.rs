@@ -47,6 +47,7 @@ pub use toml;
 pub use tower_http;
 pub use parking_lot;
 pub use derive_more;
+pub use log;
 #[cfg(any(feature = "redis"))]
 pub use redis;
 
@@ -321,9 +322,9 @@ where
         tokio::select! {
             res = tokio::signal::ctrl_c() => {
                 if let Err(e) = res {
-                    error!("Faced the following error while listening for ctrl_c: {:?}", e);
+                    error!(target: "console_server", "Faced the following error while listening for ctrl_c: {:?}", e);
                 } else {
-                    warn!("Ctrl-C received");
+                    warn!(target: "console_server", "Ctrl-C received");
                 }
             }
             () = async {
@@ -331,7 +332,7 @@ where
                     let mut event = match console_server.accept().await {
                         Ok(x) => x,
                         Err(e) => {
-                            error!("Received IOError while listening on ConsoleServer {e:?}");
+                            error!(target: "console_server", "Received IOError while listening on ConsoleServer {e:?}");
                             continue
                         }
                     };
@@ -340,7 +341,7 @@ where
                     let matches = match app.clone().try_get_matches_from(message.split_whitespace()) {
                         Ok(x) => x,
                         Err(e) => {
-                            error!("Failed to parse client console message {message}. Error: {e:?}");
+                            error!(target: "console_server", "Failed to parse client console message {message}. Error: {e:?}");
                             continue
                         }
                     };
@@ -350,7 +351,7 @@ where
                             match event.write_all($msg).await {
                                 Ok(()) => {}
                                 Err(e) => {
-                                    error!("Failed to respond to client console {e:?}");
+                                    error!(target: "console_server", "Failed to respond to client console {e:?}");
                                     continue
                                 }
                             }
@@ -363,7 +364,7 @@ where
                                 let new_level = match new_level.parse() {
                                     Ok(x) => x,
                                     Err(e) => {
-                                        error!("Failed to parse new_level: {e:?}");
+                                        error!(target: "console_server", "Failed to parse new_level: {e:?}");
                                         write_all!(format!("Failed to parse new_level: {e:?}").as_str());
                                         continue
                                     }
@@ -388,7 +389,7 @@ where
                             break
                         }
                         (cmd, _) => {
-                            error!("Received the following unrecognized command from client console: {cmd}");
+                            error!(target: "console_server", "Received the following unrecognized command from client console: {cmd}");
                             write_all!("Unrecognized command: {cmd}")
                         }
                     }

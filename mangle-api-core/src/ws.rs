@@ -1,6 +1,6 @@
-use std::{sync::{Arc}, time::Duration, mem::take, ops::{Deref, DerefMut}};
+use std::{sync::{Arc}, time::Duration, mem::take, ops::{Deref, DerefMut}, borrow::Cow};
 
-use axum::{extract::ws::{WebSocket, Message}, async_trait};
+use axum::{extract::ws::{WebSocket, Message, CloseFrame}, async_trait};
 use tokio::{task::JoinHandle, spawn, time::sleep, sync::{Mutex, MutexGuard}};
 
 
@@ -112,6 +112,7 @@ pub trait WsExt: Sized {
     async fn safe_drop(self);
     async fn final_recv(self) -> Option<Message>;
     async fn final_send(self, msg: Message) -> bool;
+    async fn final_send_close_frame(self, code: u16, reason: impl Into<Cow<'static, str>> + Send + Sync) -> bool;
 }
 
 
@@ -151,6 +152,14 @@ impl WsExt for WebSocket {
             }
             None => false
         }
+    }
+
+    async fn final_send_close_frame(self, code: u16, reason: impl Into<Cow<'static, str>> + Send + Sync) -> bool {
+        self.final_send(Message::Close(Some(CloseFrame{
+            code,
+            reason: reason.into()
+        })))
+        .await
     }
 
     async fn safe_drop(self) {

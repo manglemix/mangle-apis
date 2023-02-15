@@ -1,4 +1,5 @@
-use aws_config::load_from_env;
+use aws_config::{SdkConfig};
+use aws_sdk_cognitoidentityprovider::Region;
 use db::DB;
 use mangle_api_core::{
     make_app,
@@ -7,7 +8,7 @@ use mangle_api_core::{
     tokio,
     pre_matches,
     get_pipe_name,
-    axum::{extract::FromRef, http::HeaderValue, routing::get}, BaseConfig, BindAddress,
+    axum::{extract::FromRef, http::HeaderValue, routing::{get, post}}, BaseConfig, BindAddress,
 };
 
 mod config;
@@ -54,7 +55,14 @@ async fn main() -> anyhow::Result<()> {
         return Ok(())
     };
 
-    let aws_config = load_from_env().await;
+    #[cfg(debug_assertions)]
+    let aws_config = aws_types::sdk_config::Builder::default()
+            .region(Region::new("us-west-1"))
+            // .credentials_cache(CredentialsCache::lazy())
+            .build();
+    
+    #[cfg(not(debug_assertions))]
+    let aws_config = aws_config::load_from_env().await;
 
     let state = GlobalState {
         db: DB::new(&aws_config),
@@ -103,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
 
         ],
         [
-            ("/sign_up", get(sign_up))
+            ("/sign_up", post(sign_up))
         ]
     ).await
 }
