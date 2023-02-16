@@ -1,14 +1,14 @@
-use aws_config::{SdkConfig};
+// use aws_config::{SdkConfig};
 use aws_sdk_cognitoidentityprovider::Region;
 use db::DB;
 use mangle_api_core::{
     make_app,
     start_api,
     anyhow::{self, Context},
-    tokio,
+    tokio::{self, select},
     pre_matches,
     get_pipe_name,
-    axum::{extract::FromRef, http::HeaderValue, routing::{get, post}}, BaseConfig, BindAddress,
+    axum::{extract::{FromRef, State, WebSocketUpgrade, ws::Message}, http::HeaderValue, routing::{get}, response::Response}, BaseConfig, BindAddress, auth::oauth2::{OAuthPages, google::{GoogleOAuth, GAuthContainer, new_google_oauth_from_file}, OAuthState, OAuthPagesContainer, OAuthPagesSrc, OAuthStateContainer}, ws::{WsExt, PolledWebSocket}, oauth_redirect,
 };
 
 mod config;
@@ -16,13 +16,16 @@ mod db;
 mod user_auth;
 
 use config::Config;
-use user_auth::{UserAuth, sign_up};
+use user_auth::{UserAuth};
 
 
 #[derive(Clone)]
 struct GlobalState {
     db: DB,
-    user_auth: UserAuth
+    user_auth: UserAuth,
+    oauth_state: OAuthState,
+    gauth_state: GoogleOAuth,
+    oauth_pages: OAuthPages
 }
 
 
@@ -37,6 +40,49 @@ impl FromRef<GlobalState> for UserAuth {
     fn from_ref(input: &GlobalState) -> Self {
         input.user_auth.clone()
     }
+}
+
+
+impl GAuthContainer for GlobalState {
+    fn get_gauth_state(&self) -> &GoogleOAuth {
+        &self.gauth_state
+    }
+}
+
+
+impl OAuthPagesContainer for GlobalState {
+    fn get_oauth_pages(&self) -> &OAuthPages {
+        &self.oauth_pages
+    }
+}
+
+
+impl OAuthStateContainer for GlobalState {
+    fn get_oauth_state(&self) -> &OAuthState {
+        &self.oauth_state
+    }
+}
+
+
+async fn login(State(gauth): State<GoogleOAuth>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(|ws| async move {
+        let (auth_url, fut) = gauth.initiate_auth(["openid", "email"]);
+        let Some(ws) = ws.easy_send(Message::Text(auth_url.to_string())).await else { return };
+        
+        let mut ws = PolledWebSocket::new(ws);
+        let opt = select!{
+            opt = fut => { opt }
+            () = ws.wait_for_failure() => { return }
+        };
+        let Some(ws) = ws.into_inner().await else { return };
+
+        if let Some(_token) = opt {
+            ws.final_send_close_frame(1000, "Auth Succeeded!").await;
+            return
+        };
+
+        ws.final_send_close_frame(1000, "Auth Failed").await;
+    })
 }
 
 
@@ -64,9 +110,19 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(debug_assertions))]
     let aws_config = aws_config::load_from_env().await;
 
+    let oauth_state = OAuthState::default();
+
     let state = GlobalState {
         db: DB::new(&aws_config),
-        user_auth: UserAuth::new(&aws_config, config.cognito_client_id)
+        user_auth: UserAuth::new(&aws_config, config.cognito_client_id),
+        gauth_state: new_google_oauth_from_file(config.google_client_secret_path, oauth_state.clone()).context("parsing google oauth")?,
+        oauth_pages: OAuthPages::new(OAuthPagesSrc {
+            internal_error: "Internal Error".into(),
+            late: "Late".into(),
+            invalid: "Invalid".into(),
+            success: "Success".into()
+        }),
+        oauth_state
     };
 
     let config = BaseConfig {
@@ -108,10 +164,12 @@ async fn main() -> anyhow::Result<()> {
         pipe_name,
         config,
         [
-
+            "^/oauth/"
         ],
         [
-            ("/sign_up", post(sign_up))
+            ("/oauth/redirect", oauth_redirect!()),
+            // ("/sign_up", post(sign_up)),
+            ("/login", get(login))
         ]
     ).await
 }

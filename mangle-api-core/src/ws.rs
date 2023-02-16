@@ -1,117 +1,258 @@
 use std::{sync::{Arc}, time::Duration, mem::take, ops::{Deref, DerefMut}, borrow::Cow};
 
 use axum::{extract::ws::{WebSocket, Message, CloseFrame}, async_trait};
-use tokio::{task::JoinHandle, spawn, time::sleep, sync::{Mutex, MutexGuard}};
+use tokio::{task::JoinHandle, spawn, time::sleep, sync::{Mutex, OwnedMutexGuard, mpsc::{unbounded_channel, UnboundedReceiver}}};
 
 
 const WEBSOCKET_POLL_DELAY: Duration = Duration::from_secs(45);
 const WEBSOCKET_PING: &str = "PING!!";
 
 
-pub struct BorrowedWebSocket<'a> {
-    guard: MutexGuard<'a, Option<WebSocket>>,
-    ws: Option<WebSocket>
+struct EmptyBorrowedWebSocketImpl {
+    guard: OwnedMutexGuard<Option<WebSocket>>,
+    poller: JoinHandle<()>,
+    failed_receiver: UnboundedReceiver<()>
 }
 
 
-impl<'a> Drop for BorrowedWebSocket<'a> {
-    fn drop(&mut self) {
-        *self.guard = take(&mut self.ws);
+/// A lock of a PolledWebSocket that does not contain a WebSocket
+/// 
+/// The Websocket can be replaced to allows the polling thread to continue
+/// when the lock is dropped
+/// 
+/// The WebSocket is not polled for as long as this struct is alive
+pub struct EmptyBorrowedWebSocket {
+    inner: Option<EmptyBorrowedWebSocketImpl>
+}
+
+
+struct BorrowedWebSocketImpl {
+    guard: OwnedMutexGuard<Option<WebSocket>>,
+    ws: WebSocket,
+    poller: JoinHandle<()>,
+    failed_receiver: UnboundedReceiver<()>
+}
+
+
+/// A lock of a PolledWebSocket where ownership of the WebSocket is guaranteed
+/// 
+/// As a result, this struct dereferences to a WebSocket
+/// 
+/// The WebSocket is not polled for as long as this struct is alive
+pub struct BorrowedWebSocket {
+    // Always Some except in Drop
+    inner: Option<BorrowedWebSocketImpl>
+}
+
+
+struct PolledWebSocketImpl {
+    lock: Arc<Mutex<Option<WebSocket>>>,
+    poller: JoinHandle<()>,
+    failed_receiver: UnboundedReceiver<()>
+}
+
+
+/// A WebSocket that is polled when not locked (ie. when this struct is alive)
+/// 
+/// Polling of a WebSocket allows the connection to remain alive indefinitely,
+/// so long as the other end responds to the polls
+pub struct PolledWebSocket {
+    inner: Option<PolledWebSocketImpl>
+}
+
+
+impl EmptyBorrowedWebSocket {
+    /// Replace the WebSocket so that it can be polled when the lock is dropped
+    pub fn replace_ws(mut self, ws: WebSocket) -> BorrowedWebSocket {
+        let inner = take(&mut self.inner).unwrap();
+        BorrowedWebSocket {
+            inner: Some(BorrowedWebSocketImpl {
+                guard: inner.guard,
+                ws,
+                poller: inner.poller,
+                failed_receiver: inner.failed_receiver
+            })
+        }
     }
 }
 
 
-impl<'a> Deref for BorrowedWebSocket<'a> {
+impl Drop for EmptyBorrowedWebSocket {
+    fn drop(&mut self) {
+        take(&mut self.inner)
+            .unwrap()
+            .poller
+            .abort();
+    }
+}
+
+
+impl BorrowedWebSocket {
+    /// Stops the polling thread permanently (it is paused for as long as this struct is alive)
+    /// and returns the inner WebSocket
+    pub fn into_inner(mut self) -> WebSocket {
+        take(&mut self.inner).unwrap().ws
+    }
+    /// Returns the inner WebSocket while keeping the polling thread paused
+    pub fn borrow_inner(mut self) -> (WebSocket, EmptyBorrowedWebSocket) {
+        let inner = take(&mut self.inner).unwrap();
+        (
+            inner.ws,
+            EmptyBorrowedWebSocket {
+                inner: Some(EmptyBorrowedWebSocketImpl {
+                    guard: inner.guard,
+                    poller: inner.poller,
+                    failed_receiver: inner.failed_receiver
+                })
+            }
+        )
+    }
+    /// Unpauses the polling thread
+    pub fn unlock(mut self) -> PolledWebSocket {
+        let mut inner = take(&mut self.inner).unwrap();
+        *inner.guard = Some(inner.ws);
+        PolledWebSocket {
+            inner: Some(PolledWebSocketImpl {
+                lock: OwnedMutexGuard::mutex(&inner.guard).clone(),
+                poller: inner.poller,
+                failed_receiver: inner.failed_receiver
+            })
+        }
+    }
+}
+
+
+impl Drop for BorrowedWebSocket {
+    fn drop(&mut self) {
+        let inner = take(&mut self.inner).unwrap();
+       inner.poller.abort();
+       spawn(inner.ws.close());
+    }
+}
+
+
+impl Deref for BorrowedWebSocket {
     type Target = WebSocket;
 
     fn deref(&self) -> &Self::Target {
-        self.ws.as_ref().unwrap()
+        &self.inner.as_ref().unwrap().ws
     }
 }
 
 
-impl<'a> DerefMut for BorrowedWebSocket<'a> {
+impl DerefMut for BorrowedWebSocket {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.ws.as_mut().unwrap()
+        &mut self.inner.as_mut().unwrap().ws
     }
-}
-
-
-impl<'a> BorrowedWebSocket<'a> {
-    pub fn into_inner(mut self) -> Option<WebSocket> {
-        take(&mut self.ws)
-    }
-    pub fn take_inner(&mut self) -> Option<WebSocket> {
-        take(&mut self.ws)
-    }
-    pub fn replace_inner(&mut self, ws: WebSocket) {
-        self.ws = Some(ws);
-    }
-}
-
-
-pub struct PolledWebSocket {
-    ws: Arc<Mutex<Option<WebSocket>>>,
-    poller: JoinHandle<()>
 }
 
 
 impl PolledWebSocket {
+    /// Wrap the given WebSocket, allowing it to be polled while not locked
     pub fn new(ws: WebSocket) -> Self {
-        let ws = Arc::new(Mutex::new(Some(ws)));
-        let ws2 = ws.clone();
+        let lock = Arc::new(Mutex::new(Some(ws)));
+        let lock2 = lock.clone();
+        let (sender, failed_receiver) = unbounded_channel();
 
         let poller = spawn(async move {
+            let _sender = sender;
             loop {
                 sleep(WEBSOCKET_POLL_DELAY).await;
 
-                let mut lock = ws2.lock().await;
+                let mut guard = lock2.lock().await;
 
-                if let Some(ws) = lock.as_mut()
+                if let Some(ws) = guard.as_mut()
                 {
                     if ws.send(Message::Ping(WEBSOCKET_PING.as_bytes().into()))
                         .await
                         .is_err()
                     {
-                        let _ = take(lock.deref_mut())
+                        take(guard.deref_mut())
                             .unwrap()
-                            .close()
+                            .close_ignored()
                             .await;
                     }
+                } else {
+                    break
                 }
             }
         });
 
-        PolledWebSocket { ws, poller }
+        PolledWebSocket {
+            inner: Some(PolledWebSocketImpl {
+                lock,
+                poller,
+                failed_receiver
+            })
+        }
     }
 
-    pub async fn lock(&self) -> Option<BorrowedWebSocket> {
-        let mut guard = self.ws.lock().await;
-        if guard.is_none() {
-            None
+    /// Locks the inner WebSocket, allowing it to be used
+    /// 
+    /// If None is returned, the WebSocket faced an error the last time it was polled,
+    /// rendering it unusable
+    pub async fn lock(mut self) -> Option<BorrowedWebSocket> {
+        let inner = take(&mut self.inner).unwrap();
+        let mut guard = inner.lock.lock_owned().await;
+
+        if let Some(ws) = take(guard.deref_mut()) {
+            Some(BorrowedWebSocket {
+                inner: Some(BorrowedWebSocketImpl {
+                    guard,
+                    ws: ws,
+                    poller: inner.poller,
+                    failed_receiver: inner.failed_receiver
+                })
+            })
         } else {
-            let ws = take(guard.deref_mut());
-            Some(BorrowedWebSocket { guard, ws })
+            None
         }
+    }
+
+    /// Waits until the polling thread faced an error while using the inner WebSocket
+    pub async fn wait_for_failure(&mut self) {
+        self.inner.as_mut().unwrap().failed_receiver.recv().await;
+    }
+
+    /// Stops the polling thread and returns the inner WebSocket
+    /// 
+    /// If None is returned, the WebSocket faced an error the last time it was polled,
+    /// rendering it unusable
+    pub async fn into_inner(mut self) -> Option<WebSocket> {
+        let inner = take(&mut self.inner).unwrap();
+        inner.poller.abort();
+        let mut guard = inner.lock.lock().await;
+        take(&mut guard.deref_mut())
     }
 }
 
 
 impl Drop for PolledWebSocket {
     fn drop(&mut self) {
-        self.poller.abort();
-        take(self.ws.blocking_lock().deref_mut()).map(|x| x.close());
+        if let Some(inner) = take(&mut self.inner) {
+            inner.poller.abort();
+            let mut lock = inner.lock.blocking_lock();
+            if let Some(ws) = take(lock.deref_mut()) {
+                spawn(ws.close());
+            }
+        }
     }
 }
 
 
 #[async_trait]
 pub trait WsExt: Sized {
+    /// Waits for a message, or safely drops when an error is faced
     async fn easy_recv(self) -> Option<(Self, Message)>;
+    /// Sends a message, or safely drops when an error is faced
     async fn easy_send(self, msg: Message) -> Option<Self>;
-    async fn safe_drop(self);
+    /// Closes while ignoring the result
+    async fn close_ignored(self);
+    /// Receive one last message and safely drop regardless of what happened
     async fn final_recv(self) -> Option<Message>;
+    /// Send one last message and safely drop regardless of what happened
     async fn final_send(self, msg: Message) -> bool;
+    /// Send a close frame and safely drop regardless of what happened
     async fn final_send_close_frame(self, code: u16, reason: impl Into<Cow<'static, str>> + Send + Sync) -> bool;
 }
 
@@ -140,14 +281,14 @@ impl WsExt for WebSocket {
 
     async fn final_recv(self) -> Option<Message> {
         let (ws, msg) = self.easy_recv().await?;
-        ws.safe_drop().await;
+        ws.close_ignored().await;
         Some(msg)
     }
 
     async fn final_send(self, msg: Message) -> bool {
         match self.easy_send(msg).await {
             Some(ws) => {
-                ws.safe_drop().await;
+                ws.close_ignored().await;
                 true
             }
             None => false
@@ -162,7 +303,7 @@ impl WsExt for WebSocket {
         .await
     }
 
-    async fn safe_drop(self) {
+    async fn close_ignored(self) {
         let _ = self.close();
     }
 }

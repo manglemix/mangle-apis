@@ -19,7 +19,7 @@ pub struct Config {
     #[serde(default = "Default::default")]
     pub cors_allowed_origins: Vec<String>,
     
-    // pub google_client_secret_path: String,
+    pub google_client_secret_path: String,
     // pub github_client_secret_path: String,
 
     pub api_token: String,
