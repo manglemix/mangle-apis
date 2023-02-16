@@ -1,6 +1,4 @@
-use std::{
-    borrow::Cow, collections::HashMap, future::Future, mem::transmute, sync::Arc, time::Duration,
-};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use log::warn;
 use parking_lot::Mutex;
@@ -25,9 +23,8 @@ use tokio::{
 use crate::log_targets;
 
 pub const GOOGLE_PROFILE_SCOPES: [&str; 2] = [
-    "openid",
-    "email", // "https://www.googleapis.com/auth/userinfo.email",
-            // "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
 ];
 pub const GITHUB_PROFILE_SCOPES: [&str; 1] = ["user:email"];
 
@@ -76,8 +73,9 @@ impl<const PKCE: bool> OAuth<PKCE> {
         client_id: String,
         client_secret: String,
         revocation_url: Option<String>,
+        redirect_url: String,
         oauth_state: OAuthState,
-    ) -> OAuth<PKCE> {
+    ) -> Self {
         Self {
             oauth_state,
             client: Arc::new(new_oauth_client(
@@ -85,7 +83,7 @@ impl<const PKCE: bool> OAuth<PKCE> {
                 token_url,
                 client_id,
                 client_secret,
-                "http://localhost/oauth/redirect".to_string(),
+                redirect_url,
                 revocation_url,
             )),
         }
@@ -159,72 +157,6 @@ pub struct OAuthState {
     pending_auths: Arc<Mutex<HashMap<String, PendingSession>>>,
 }
 
-pub struct OAuthPagesSrc {
-    pub late: String,
-    pub invalid: String,
-    pub internal_error: String,
-    pub success: String,
-}
-
-#[derive(Clone)]
-pub struct OAuthPages {
-    _src: Arc<OAuthPagesSrc>,
-    late: Cow<'static, String>,
-    invalid: Cow<'static, String>,
-    internal_error: Cow<'static, String>,
-    success: Cow<'static, String>,
-}
-
-impl OAuthPages {
-    pub fn new(src: OAuthPagesSrc) -> Self {
-        let _src = Arc::new(src);
-        // Borrows of fields are tied to this struct, not static
-        // This is fine because this struct holds an Arc of the src,
-        // so borrows will be valid for as long as the struct is alive
-        unsafe {
-            Self {
-                late: Cow::Borrowed(transmute(&_src.late)),
-                invalid: Cow::Borrowed(transmute(&_src.invalid)),
-                internal_error: Cow::Borrowed(transmute(&_src.internal_error)),
-                success: Cow::Borrowed(transmute(&_src.success)),
-                _src,
-            }
-        }
-    }
-
-    pub fn borrow_late(&self) -> &str {
-        &self.late
-    }
-
-    pub fn borrow_invalid(&self) -> &str {
-        &self.invalid
-    }
-
-    pub fn borrow_internal_error(&self) -> &str {
-        &self.internal_error
-    }
-
-    pub fn borrow_success(&self) -> &str {
-        &self.success
-    }
-
-    pub fn set_late(&mut self, late: String) {
-        self.late = Cow::Owned(late)
-    }
-
-    pub fn set_invalid(&mut self, invalid: String) {
-        self.invalid = Cow::Owned(invalid)
-    }
-
-    pub fn set_internal_error(&mut self, internal_error: String) {
-        self.internal_error = Cow::Owned(internal_error)
-    }
-
-    pub fn set_success(&mut self, success: String) {
-        self.success = Cow::Owned(success)
-    }
-}
-
 struct Untracker {
     oauth_state: OAuthState,
     csrf_token: CsrfToken,
@@ -296,7 +228,7 @@ impl OAuthState {
                         Html(pages.invalid.into_owned())
                     }
                     _ => Html(pages.internal_error.into_owned()),
-                }
+                };
             }
         };
 
@@ -309,16 +241,6 @@ impl OAuthState {
 pub struct AuthRedirectParams {
     state: String,
     code: String,
-}
-
-pub trait OAuthPagesContainer {
-    fn get_oauth_pages(&self) -> &OAuthPages;
-}
-
-impl<'a, T: OAuthPagesContainer> FromRef<T> for OAuthPages {
-    fn from_ref(input: &T) -> Self {
-        input.get_oauth_pages().clone()
-    }
 }
 
 pub trait OAuthStateContainer {
@@ -349,6 +271,8 @@ macro_rules! oauth_redirect {
 }
 
 pub use oauth_redirect;
+
+use super::auth_pages::AuthPages;
 
 pub mod google {
     use std::{fs::read_to_string, path::Path};

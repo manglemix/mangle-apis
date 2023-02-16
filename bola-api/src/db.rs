@@ -3,8 +3,6 @@ use aws_types::SdkConfig;
 use mangle_api_core::derive_more::Display;
 use thiserror::Error;
 
-const BOLA_PROFILES_TABLE: &str = "bola_profiles";
-
 #[derive(Debug)]
 pub struct UserProfile {
     easy_highscore: u16,
@@ -23,12 +21,14 @@ pub enum GetItemError {
 #[derive(Clone)]
 pub struct DB {
     client: Client,
+    bola_profiles_table: String,
 }
 
 impl DB {
-    pub fn new(config: &SdkConfig) -> Self {
+    pub fn new(config: &SdkConfig, bola_profiles_table: String) -> Self {
         Self {
             client: Client::new(config),
+            bola_profiles_table,
         }
     }
 
@@ -39,7 +39,7 @@ impl DB {
         let item = self
             .client
             .get_item()
-            .set_table_name(Some(BOLA_PROFILES_TABLE.to_string()))
+            .table_name(self.bola_profiles_table.clone())
             .key("email", AttributeValue::S(email.into()))
             .send()
             .await

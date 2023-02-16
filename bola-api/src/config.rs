@@ -19,9 +19,10 @@ pub struct Config {
     pub cors_allowed_origins: Vec<String>,
 
     pub google_client_secret_path: String,
+    #[serde(default = "bola_profiles_table")]
+    pub bola_profiles_table: String,
     // pub github_client_secret_path: String,
     pub api_token: String,
-    pub cognito_client_id: String,
     // pub token_duration: u16,
 }
 
@@ -92,4 +93,8 @@ fn routing_log() -> String {
 
 fn suspicious_security_log() -> String {
     "suspicious_security.log".into()
+}
+
+fn bola_profiles_table() -> String {
+    "bola_profiles".into()
 }
