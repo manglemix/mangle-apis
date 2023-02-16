@@ -1,23 +1,28 @@
-use std::{collections::{HashMap}, sync::Arc, time::Duration, ops::Deref, marker::PhantomData, hash::Hash};
+use std::{
+    collections::HashMap, hash::Hash, marker::PhantomData, ops::Deref, sync::Arc, time::Duration,
+};
 
-use axum::{http::{HeaderValue, StatusCode, request::Parts}, extract::{FromRequestParts, FromRef}, async_trait};
+use axum::{
+    async_trait,
+    extract::{FromRef, FromRequestParts},
+    http::{request::Parts, HeaderValue, StatusCode},
+};
 use parking_lot::Mutex;
-use rand::{distributions::Alphanumeric, Rng, thread_rng};
-use tokio::{spawn, time::sleep, sync::oneshot::{Sender, channel}};
-
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use tokio::{
+    spawn,
+    sync::oneshot::{channel, Sender},
+    time::sleep,
+};
 
 #[derive(Clone, Hash)]
 pub struct Token<const N: u8>(HeaderValue);
 
-
 impl<const N: u8> Into<String> for Token<N> {
     fn into(self) -> String {
-        unsafe {
-            String::from_utf8_unchecked(self.0.as_bytes().into())
-        }
+        unsafe { String::from_utf8_unchecked(self.0.as_bytes().into()) }
     }
 }
-
 
 impl<const N: u8> TryFrom<HeaderValue> for Token<N> {
     type Error = HeaderValue;
@@ -31,7 +36,6 @@ impl<const N: u8> TryFrom<HeaderValue> for Token<N> {
     }
 }
 
-
 #[derive(Clone)]
 pub struct TokenGranter<const N: u8, T: Send + Sync + 'static> {
     // When the sender gets dropped, the task responsible for expiring the token will also complete
@@ -39,12 +43,11 @@ pub struct TokenGranter<const N: u8, T: Send + Sync + 'static> {
     token_duration: Duration,
 }
 
-
 impl<const N: u8, T: Send + Sync + 'static> TokenGranter<N, T> {
     pub fn new(token_duration: Duration) -> Self {
         Self {
             tokens: Default::default(),
-            token_duration
+            token_duration,
         }
     }
 
@@ -53,14 +56,14 @@ impl<const N: u8, T: Send + Sync + 'static> TokenGranter<N, T> {
             .sample_iter(&Alphanumeric)
             .take(N as usize)
             .collect();
-        
-        let token = unsafe {
-            Token(HeaderValue::from_maybe_shared_unchecked(bytes))
-        };
+
+        let token = unsafe { Token(HeaderValue::from_maybe_shared_unchecked(bytes)) };
 
         let (sender, receiver) = channel();
 
-        self.tokens.lock().insert(token.0.clone(), (sender, Arc::new(item)));
+        self.tokens
+            .lock()
+            .insert(token.0.clone(), (sender, Arc::new(item)));
 
         let token2 = token.clone();
         let token_duration = self.token_duration;
@@ -83,18 +86,18 @@ impl<const N: u8, T: Send + Sync + 'static> TokenGranter<N, T> {
     }
 }
 
-
-pub trait HeaderTokenGranter<const N: u8, T: Send + Sync + 'static>: Deref<Target=TokenGranter<N, T>> {
+pub trait HeaderTokenGranter<const N: u8, T: Send + Sync + 'static>:
+    Deref<Target = TokenGranter<N, T>>
+{
     const HEADER_NAME: &'static str;
 }
-
 
 #[macro_export]
 macro_rules! create_header_token_granter {
     ($vis: vis $name: ident $header_name: literal $token_length: literal $item_type: ty) => {
         #[derive(Clone)]
         $vis struct $name($crate::auth::token::TokenGranter<$token_length, $item_type>);
-        
+
         impl std::ops::Deref for $name {
             type Target = $crate::auth::token::TokenGranter<$token_length, $item_type>;
 
@@ -117,22 +120,22 @@ macro_rules! create_header_token_granter {
 
 pub use create_header_token_granter;
 
-
 pub struct VerifiedToken<const N: u8, T: Send + Sync + 'static, TG: HeaderTokenGranter<N, T>> {
     pub token: Token<N>,
     pub item: Arc<T>,
-    _phantom: PhantomData<TG>
+    _phantom: PhantomData<TG>,
 }
 
-
 #[async_trait]
-impl<S: Sync, const N: u8, T: Send + Sync + 'static, TG: HeaderTokenGranter<N, T> + FromRef<S>> FromRequestParts<S> for VerifiedToken<N, T, TG> {
+impl<S: Sync, const N: u8, T: Send + Sync + 'static, TG: HeaderTokenGranter<N, T> + FromRef<S>>
+    FromRequestParts<S> for VerifiedToken<N, T, TG>
+{
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         if let Some(token) = parts.headers.get(TG::HEADER_NAME) {
             if token.len() != N as usize {
-                return Err((StatusCode::BAD_REQUEST, "Invalid length for token".into()))
+                return Err((StatusCode::BAD_REQUEST, "Invalid length for token".into()));
             }
 
             let tokens = TG::from_ref(state);
@@ -142,13 +145,16 @@ impl<S: Sync, const N: u8, T: Send + Sync + 'static, TG: HeaderTokenGranter<N, T
                 Ok(Self {
                     token: Token(token.to_owned()),
                     item: item.clone(),
-                    _phantom: Default::default()
+                    _phantom: Default::default(),
                 })
             } else {
                 Err((StatusCode::UNAUTHORIZED, "Invalid or expired token".into()))
             }
         } else {
-            Err((StatusCode::BAD_REQUEST, format!("Missing header: {}", TG::HEADER_NAME)))
+            Err((
+                StatusCode::BAD_REQUEST,
+                format!("Missing header: {}", TG::HEADER_NAME),
+            ))
         }
     }
 }

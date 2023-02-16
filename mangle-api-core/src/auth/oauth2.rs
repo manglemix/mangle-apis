@@ -1,31 +1,38 @@
-use std::{sync::{Arc}, collections::HashMap, time::{Duration}, future::Future, borrow::Cow, mem::transmute};
+use std::{
+    borrow::Cow, collections::HashMap, future::Future, mem::transmute, sync::Arc, time::Duration,
+};
 
 use log::warn;
 use parking_lot::Mutex;
 
-use axum::{extract::{Query, State, FromRef}};
-use oauth2::{url::Url, AuthorizationCode, CsrfToken, AuthUrl, TokenUrl, basic::{BasicClient, BasicTokenType}, ClientId, ClientSecret, RedirectUrl, RevocationUrl, PkceCodeChallenge, Scope, reqwest::async_http_client, PkceCodeVerifier, StandardTokenResponse, EmptyExtraTokenFields};
-use anyhow::{Result};
-use serde::Deserialize;
-use tokio::{sync::oneshot::{channel, Sender}, time::sleep};
+use anyhow::Result;
+use axum::extract::{FromRef, Query, State};
 use axum::response::Html;
+use oauth2::{
+    basic::{BasicClient, BasicTokenType},
+    reqwest::async_http_client,
+    url::Url,
+    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RevocationUrl, Scope, StandardTokenResponse,
+    TokenUrl,
+};
+use serde::Deserialize;
+use tokio::{
+    sync::oneshot::{channel, Sender},
+    time::sleep,
+};
 
-use crate::{log_targets};
-
+use crate::log_targets;
 
 pub const GOOGLE_PROFILE_SCOPES: [&str; 2] = [
     "openid",
-    "email"
-    // "https://www.googleapis.com/auth/userinfo.email",
-    // "https://www.googleapis.com/auth/userinfo.profile",
+    "email", // "https://www.googleapis.com/auth/userinfo.email",
+            // "https://www.googleapis.com/auth/userinfo.profile",
 ];
-pub const GITHUB_PROFILE_SCOPES: [&str; 1] = [
-    "user:email",
-];
+pub const GITHUB_PROFILE_SCOPES: [&str; 1] = ["user:email"];
 
 /// How much time to wait for authorization to be granted by OAuth
 pub const MAX_AUTH_WAIT_TIME: Duration = Duration::from_secs(180);
-
 
 fn new_oauth_client(
     auth_url: String,
@@ -33,12 +40,10 @@ fn new_oauth_client(
     client_id: String,
     client_secret: String,
     redirect_url: String,
-    revocation_url: Option<String>
+    revocation_url: Option<String>,
 ) -> BasicClient {
-    let auth_url = AuthUrl::new(auth_url)
-        .expect("Invalid authorization endpoint URL");
-    let token_url = TokenUrl::new(token_url)
-        .expect("Invalid token endpoint URL");
+    let auth_url = AuthUrl::new(auth_url).expect("Invalid authorization endpoint URL");
+    let token_url = TokenUrl::new(token_url).expect("Invalid token endpoint URL");
 
     // Set up the config for the Google OAuth2 process.
     let mut client = BasicClient::new(
@@ -47,28 +52,22 @@ fn new_oauth_client(
         auth_url,
         Some(token_url),
     )
-    .set_redirect_uri(
-        RedirectUrl::new(redirect_url)
-            .expect("Invalid redirect URL"),
-    );
+    .set_redirect_uri(RedirectUrl::new(redirect_url).expect("Invalid redirect URL"));
 
     if let Some(revocation_url) = revocation_url {
         client = client.set_revocation_uri(
-            RevocationUrl::new(revocation_url)
-                .expect("Invalid revocation endpoint URL"),
+            RevocationUrl::new(revocation_url).expect("Invalid revocation endpoint URL"),
         );
     }
-    
+
     client
 }
-
 
 #[derive(Clone)]
 pub struct OAuth<const PKCE: bool> {
     oauth_state: OAuthState,
-    client: Arc<BasicClient>
+    client: Arc<BasicClient>,
 }
-
 
 impl<const PKCE: bool> OAuth<PKCE> {
     fn new(
@@ -77,7 +76,7 @@ impl<const PKCE: bool> OAuth<PKCE> {
         client_id: String,
         client_secret: String,
         revocation_url: Option<String>,
-        oauth_state: OAuthState
+        oauth_state: OAuthState,
     ) -> OAuth<PKCE> {
         Self {
             oauth_state,
@@ -87,17 +86,20 @@ impl<const PKCE: bool> OAuth<PKCE> {
                 client_id,
                 client_secret,
                 "http://localhost/oauth/redirect".to_string(),
-                revocation_url
-            ))
+                revocation_url,
+            )),
         }
     }
 
     /// Initiates an OAuth attempt with the given scopes
-    /// 
+    ///
     /// Returns a tuple with the authorization Url to give to the user, and a
     /// future that resolves to Some(token) where token is the OAuth token, or
     /// None if authentication timed out or failed
-    pub fn initiate_auth(&self, scopes: impl IntoIterator<Item=impl Into<String>>) -> (Url, impl Future<Output=Option<OAuthToken>>) {
+    pub fn initiate_auth(
+        &self,
+        scopes: impl IntoIterator<Item = impl Into<String>>,
+    ) -> (Url, impl Future<Output = Option<OAuthToken>>) {
         let mut auth_request = self.client.authorize_url(CsrfToken::new_random);
 
         for scope in scopes {
@@ -114,8 +116,9 @@ impl<const PKCE: bool> OAuth<PKCE> {
         } else {
             pkce_code_verifier = None;
             auth_request
-        }.url();
-        
+        }
+        .url();
+
         let (ready_sender, receiver) = channel();
 
         let oauth_state = self.oauth_state.clone();
@@ -123,7 +126,7 @@ impl<const PKCE: bool> OAuth<PKCE> {
             csrf_token,
             pkce_code_verifier,
             self.client.clone(),
-            ready_sender
+            ready_sender,
         );
 
         let fut = async move {
@@ -143,9 +146,7 @@ impl<const PKCE: bool> OAuth<PKCE> {
     }
 }
 
-
 pub type OAuthToken = StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>;
-
 
 struct PendingSession {
     ready_sender: Sender<OAuthToken>,
@@ -153,20 +154,17 @@ struct PendingSession {
     client: Arc<BasicClient>,
 }
 
-
 #[derive(Default, Clone)]
 pub struct OAuthState {
-    pending_auths: Arc<Mutex<HashMap<String, PendingSession>>>
+    pending_auths: Arc<Mutex<HashMap<String, PendingSession>>>,
 }
-
 
 pub struct OAuthPagesSrc {
     pub late: String,
     pub invalid: String,
     pub internal_error: String,
-    pub success: String
+    pub success: String,
 }
-
 
 #[derive(Clone)]
 pub struct OAuthPages {
@@ -174,9 +172,8 @@ pub struct OAuthPages {
     late: Cow<'static, String>,
     invalid: Cow<'static, String>,
     internal_error: Cow<'static, String>,
-    success: Cow<'static, String>
+    success: Cow<'static, String>,
 }
-
 
 impl OAuthPages {
     pub fn new(src: OAuthPagesSrc) -> Self {
@@ -190,7 +187,7 @@ impl OAuthPages {
                 invalid: Cow::Borrowed(transmute(&_src.invalid)),
                 internal_error: Cow::Borrowed(transmute(&_src.internal_error)),
                 success: Cow::Borrowed(transmute(&_src.success)),
-                _src
+                _src,
             }
         }
     }
@@ -228,12 +225,10 @@ impl OAuthPages {
     }
 }
 
-
 struct Untracker {
     oauth_state: OAuthState,
-    csrf_token: CsrfToken
+    csrf_token: CsrfToken,
 }
-
 
 impl Drop for Untracker {
     fn drop(&mut self) {
@@ -241,27 +236,26 @@ impl Drop for Untracker {
     }
 }
 
-
 impl OAuthState {
     fn track_session(
         &self,
-        csrf_token: CsrfToken, 
+        csrf_token: CsrfToken,
         pkce_code_verifier: Option<PkceCodeVerifier>,
         client: Arc<BasicClient>,
-        ready_sender: Sender<OAuthToken>
+        ready_sender: Sender<OAuthToken>,
     ) -> Untracker {
         self.pending_auths.lock().insert(
             csrf_token.secret().clone(),
             PendingSession {
                 ready_sender,
                 pkce_code_verifier,
-                client
-            }
+                client,
+            },
         );
 
         Untracker {
             oauth_state: self.clone(),
-            csrf_token
+            csrf_token,
         }
     }
 
@@ -269,52 +263,57 @@ impl OAuthState {
         let _ = self.pending_auths.lock().remove(csrf_token.secret());
     }
 
-    async fn verify_auth(&self, auth_code: AuthorizationCode, csrf_token: CsrfToken, pages: OAuthPages) -> Html<String> {
+    async fn verify_auth(
+        &self,
+        auth_code: AuthorizationCode,
+        csrf_token: CsrfToken,
+        pages: OAuthPages,
+    ) -> Html<String> {
         let pending = if let Some(x) = self.pending_auths.lock().remove(csrf_token.secret()) {
             x
         } else {
-            return Html(pages.late.into_owned())
+            return Html(pages.late.into_owned());
         };
 
         let client = pending.client;
-        
+
         let mut request = client.exchange_code(auth_code);
 
         if let Some(pkce_code_verifier) = pending.pkce_code_verifier {
             request = request.set_pkce_verifier(pkce_code_verifier);
         }
 
-        let token = match request
-            .request_async(async_http_client)
-            .await {
-                Ok(x) => x,
-                Err(e) => return match e {
+        let token = match request.request_async(async_http_client).await {
+            Ok(x) => x,
+            Err(e) => {
+                return match e {
                     oauth2::RequestTokenError::ServerResponse(x) => {
                         // TODO Provide more info
-                        warn!(target: log_targets::SUSPICIOUS_SECURITY, "Received bad gauth response: {x:?}");
+                        warn!(
+                            target: log_targets::SUSPICIOUS_SECURITY,
+                            "Received bad gauth response: {x:?}"
+                        );
                         Html(pages.invalid.into_owned())
                     }
-                    _ => Html(pages.internal_error.into_owned())
+                    _ => Html(pages.internal_error.into_owned()),
                 }
-            };
+            }
+        };
 
         let _ = pending.ready_sender.send(token);
         Html(pages.success.into_owned())
     }
 }
 
-
 #[derive(Deserialize)]
 pub struct AuthRedirectParams {
     state: String,
-    code: String
+    code: String,
 }
-
 
 pub trait OAuthPagesContainer {
     fn get_oauth_pages(&self) -> &OAuthPages;
 }
-
 
 impl<'a, T: OAuthPagesContainer> FromRef<T> for OAuthPages {
     fn from_ref(input: &T) -> Self {
@@ -322,11 +321,9 @@ impl<'a, T: OAuthPagesContainer> FromRef<T> for OAuthPages {
     }
 }
 
-
 pub trait OAuthStateContainer {
     fn get_oauth_state(&self) -> &OAuthState;
 }
-
 
 impl<T: OAuthStateContainer> FromRef<T> for OAuthState {
     fn from_ref(input: &T) -> Self {
@@ -334,19 +331,15 @@ impl<T: OAuthStateContainer> FromRef<T> for OAuthState {
     }
 }
 
-
 pub async fn oauth_redirect_handler(
     Query(AuthRedirectParams { state, code }): Query<AuthRedirectParams>,
     State(oauth_state): State<OAuthState>,
-    State(pages): State<OAuthPages>
+    State(pages): State<OAuthPages>,
 ) -> Html<String> {
-    oauth_state.verify_auth(
-        AuthorizationCode::new(code),
-        CsrfToken::new(state),
-        pages
-    ).await
+    oauth_state
+        .verify_auth(AuthorizationCode::new(code), CsrfToken::new(state), pages)
+        .await
 }
-
 
 #[macro_export]
 macro_rules! oauth_redirect {
@@ -355,12 +348,10 @@ macro_rules! oauth_redirect {
     };
 }
 
-
 pub use oauth_redirect;
 
-
 pub mod google {
-    use std::{path::Path, fs::read_to_string};
+    use std::{fs::read_to_string, path::Path};
 
     use serde_json::from_str;
 
@@ -370,7 +361,7 @@ pub mod google {
     pub trait GAuthContainer {
         fn get_gauth_state(&self) -> &GoogleOAuth;
     }
-    
+
     impl<T: GAuthContainer> FromRef<T> for GoogleOAuth {
         fn from_ref(input: &T) -> Self {
             input.get_gauth_state().clone()
@@ -379,39 +370,36 @@ pub mod google {
 
     pub fn new_google_oauth_from_file(
         filename: impl AsRef<Path>,
-        oauth_state: OAuthState
+        oauth_state: OAuthState,
     ) -> Result<GoogleOAuth> {
         #[derive(Deserialize, Debug)]
         struct ClientSecret {
             client_id: String,
             client_secret: String,
             auth_uri: String,
-            token_uri: String
+            token_uri: String,
         }
         #[derive(Deserialize)]
         struct WebSecret {
-            installed: ClientSecret
+            installed: ClientSecret,
         }
 
         let secrets: WebSecret = from_str(&read_to_string(filename)?)?;
         let secrets = secrets.installed;
 
-        Ok(
-            GoogleOAuth::new(
-                secrets.auth_uri,
-                secrets.token_uri,
-                secrets.client_id,
-                secrets.client_secret,
-                Some("https://oauth2.googleapis.com/revoke".to_string()),
-                oauth_state
-            )
-        )
+        Ok(GoogleOAuth::new(
+            secrets.auth_uri,
+            secrets.token_uri,
+            secrets.client_id,
+            secrets.client_secret,
+            Some("https://oauth2.googleapis.com/revoke".to_string()),
+            oauth_state,
+        ))
     }
 }
 
-
 pub mod github {
-    use std::{path::Path, fs::read_to_string};
+    use std::{fs::read_to_string, path::Path};
 
     use serde_json::from_str;
 
@@ -421,7 +409,7 @@ pub mod github {
     pub trait GithubOAuthContainer {
         fn get_github_auth_state(&self) -> &GithubOAuth;
     }
-    
+
     impl<T: GithubOAuthContainer> FromRef<T> for GithubOAuth {
         fn from_ref(input: &T) -> Self {
             input.get_github_auth_state().clone()
@@ -430,7 +418,7 @@ pub mod github {
 
     pub fn new_github_oauth_from_file(
         filename: impl AsRef<Path>,
-        oauth_state: OAuthState
+        oauth_state: OAuthState,
     ) -> Result<GithubOAuth> {
         #[derive(Deserialize, Debug)]
         struct ClientSecret {
@@ -440,15 +428,13 @@ pub mod github {
 
         let secrets: ClientSecret = from_str(&read_to_string(filename)?)?;
 
-        Ok(
-            GithubOAuth::new(
-                "https://github.com/login/oauth/authorize".to_string(),
-                "https://github.com/login/oauth/access_token".to_string(),
-                secrets.client_id,
-                secrets.client_secret,
-                None,
-                oauth_state
-            )
-        )
+        Ok(GithubOAuth::new(
+            "https://github.com/login/oauth/authorize".to_string(),
+            "https://github.com/login/oauth/access_token".to_string(),
+            secrets.client_id,
+            secrets.client_secret,
+            None,
+            oauth_state,
+        ))
     }
 }

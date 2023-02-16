@@ -1,9 +1,11 @@
-use std::{sync::{mpsc::{Sender, Receiver, channel}, atomic::{AtomicBool, Ordering}}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::{channel, Receiver, Sender},
+};
 
 #[derive(Clone)]
 pub struct AliveFlag(Sender<()>);
 pub struct AliveTracker(Receiver<()>, AtomicBool);
-
 
 impl AliveTracker {
     pub fn wait_for_death(&self) {
@@ -14,8 +16,10 @@ impl AliveTracker {
     }
 }
 
-
 pub fn aliveness_pair() -> (AliveFlag, AliveTracker) {
     let (sender, receiver) = channel();
-    (AliveFlag(sender), AliveTracker(receiver, AtomicBool::new(false)))
+    (
+        AliveFlag(sender),
+        AliveTracker(receiver, AtomicBool::new(false)),
+    )
 }

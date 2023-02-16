@@ -1,6 +1,5 @@
 use mangle_api_core::serde::Deserialize;
 
-
 #[derive(Deserialize)]
 #[serde(crate = "mangle_api_core::serde")]
 pub struct Config {
@@ -18,16 +17,13 @@ pub struct Config {
     pub cors_allowed_methods: Vec<String>,
     #[serde(default = "Default::default")]
     pub cors_allowed_origins: Vec<String>,
-    
+
     pub google_client_secret_path: String,
     // pub github_client_secret_path: String,
-
     pub api_token: String,
     pub cognito_client_id: String,
-
     // pub token_duration: u16,
 }
-
 
 // impl BaseConfig for Config {
 //     fn get_stderr_log_path(&self) -> mangle_api_core::anyhow::Result<&std::path::Path> {
@@ -78,26 +74,21 @@ pub struct Config {
 //     }
 // }
 
-
 fn default_server_address() -> String {
     "0.0.0.0".into()
 }
-
 
 fn default_server_port() -> u16 {
     80
 }
 
-
 fn stderr_log() -> String {
     "stderr.log".into()
 }
 
-
 fn routing_log() -> String {
     "routing.log".into()
 }
-
 
 fn suspicious_security_log() -> String {
     "suspicious_security.log".into()

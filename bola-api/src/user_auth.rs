@@ -1,35 +1,37 @@
-use std::{sync::Arc, ops::Deref};
+use std::{ops::Deref, sync::Arc};
 
+use aws_sdk_cognitoidentityprovider::{
+    model::{AttributeType, UserStatusType},
+    Client,
+};
 use aws_types::SdkConfig;
-use aws_sdk_cognitoidentityprovider::{Client, model::{AttributeType, UserStatusType}};
 // use itertools::Itertools;
-use mangle_api_core::{axum::{extract::{State}, http::StatusCode, Form}, serde::{Deserialize, self}, log::error};
-
+use mangle_api_core::{
+    axum::{extract::State, http::StatusCode, Form},
+    log::error,
+    serde::{self, Deserialize},
+};
 
 // #[derive(Error, Debug, Display)]
 // pub enum LoginError {
 //     AWSError(#[from] SdkError<InitiateAuthError>)
 // }
 
-
 // struct UserAuthImpl {
 //     client_id: String
 // }
 
-
 #[derive(Clone)]
 pub struct UserAuth {
     client: Client,
-    client_id: Arc<String>
-    // auth_impl: Arc<UserAuthImpl>
+    client_id: Arc<String>, // auth_impl: Arc<UserAuthImpl>
 }
-
 
 impl UserAuth {
     pub fn new(config: &SdkConfig, client_id: String) -> Self {
         Self {
             client: Client::new(config),
-            client_id: Arc::new(client_id)
+            client_id: Arc::new(client_id),
         }
     }
 
@@ -67,12 +69,10 @@ impl UserAuth {
     // }
 }
 
-
 // pub struct SignUpFinalizer<'a> {
 //     user_auth: &'a UserAuth,
 //     username: String
 // }
-
 
 // impl<'a> SignUpFinalizer<'a> {
 //     pub async fn finalize_sign_up(self, confirmation_code: impl Into<String>) -> Result<(), SdkError<ConfirmSignUpError>> {
@@ -91,16 +91,14 @@ impl UserAuth {
 //     }
 // }
 
-
 #[derive(Deserialize)]
-#[serde(crate="serde")]
+#[serde(crate = "serde")]
 pub struct SignUpData {
     username: String,
     password: String,
     email: String,
-    nickname: Option<String>
+    nickname: Option<String>,
 }
-
 
 pub async fn sign_up(
     State(user_auth): State<UserAuth>,
@@ -108,25 +106,21 @@ pub async fn sign_up(
         username,
         password,
         email,
-        nickname
-    }): Form<SignUpData>
+        nickname,
+    }): Form<SignUpData>,
 ) -> (StatusCode, String) {
-    if let Err(e) = user_auth.client
+    if let Err(e) = user_auth
+        .client
         .sign_up()
         .client_id(user_auth.client_id.deref())
         .username(&username)
         .password(password)
-        .user_attributes(
-            AttributeType::builder()
-                .name("email")
-                .value(email)
-                .build()
-        )
+        .user_attributes(AttributeType::builder().name("email").value(email).build())
         .user_attributes(
             AttributeType::builder()
                 .name("nickname")
                 .value(nickname.as_ref().unwrap_or(&username))
-                .build()
+                .build(),
         )
         .send()
         .await
@@ -134,40 +128,46 @@ pub async fn sign_up(
         use aws_sdk_cognitoidentityprovider::error::SignUpErrorKind::*;
         return match e.into_service_error().kind {
             InvalidPasswordException(e) => (StatusCode::BAD_REQUEST, e.to_string()),
-            CodeDeliveryFailureException(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Message failed to deliver".into()),
-            UsernameExistsException(_) => match user_auth.client
-                    .admin_get_user()
-                    .username(&username)
-                    .user_pool_id("BolaUsers")
-                    .send()
-                    .await
-                {
-                    Ok(x) => if let Some(&UserStatusType::Unconfirmed) = x.user_status()
+            CodeDeliveryFailureException(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Message failed to deliver".into(),
+            ),
+            UsernameExistsException(_) => match user_auth
+                .client
+                .admin_get_user()
+                .username(&username)
+                .user_pool_id("BolaUsers")
+                .send()
+                .await
+            {
+                Ok(x) => {
+                    if let Some(&UserStatusType::Unconfirmed) = x.user_status() {
+                        if let Err(e) = user_auth
+                            .client
+                            .admin_delete_user()
+                            .username(&username)
+                            .send()
+                            .await
                         {
-                            if let Err(e) = user_auth.client
-                                .admin_delete_user()
-                                .username(&username)
-                                .send()
-                                .await
-                            {
-                                error!(target: "user_auth", "{e:?}");
-                                (StatusCode::INTERNAL_SERVER_ERROR, String::new())
-                            } else {
-                                (StatusCode::OK, String::new())
-                            }
+                            error!(target: "user_auth", "{e:?}");
+                            (StatusCode::INTERNAL_SERVER_ERROR, String::new())
                         } else {
-                            (StatusCode::BAD_REQUEST, "Username exists".into())
+                            (StatusCode::OK, String::new())
                         }
-                    Err(e) => {
-                        error!(target: "user_auth", "{e:?}");
-                        (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+                    } else {
+                        (StatusCode::BAD_REQUEST, "Username exists".into())
                     }
                 }
+                Err(e) => {
+                    error!(target: "user_auth", "{e:?}");
+                    (StatusCode::INTERNAL_SERVER_ERROR, String::new())
+                }
+            },
             e => {
                 error!(target: "user_auth", "{e:?}");
                 (StatusCode::INTERNAL_SERVER_ERROR, String::new())
             }
-        }
+        };
     }
     (StatusCode::OK, String::new())
 }

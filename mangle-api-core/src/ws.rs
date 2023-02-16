@@ -1,65 +1,74 @@
-use std::{sync::{Arc}, time::Duration, mem::take, ops::{Deref, DerefMut}, borrow::Cow};
+use std::{
+    borrow::Cow,
+    mem::take,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+    time::Duration,
+};
 
-use axum::{extract::ws::{WebSocket, Message, CloseFrame}, async_trait};
-use tokio::{task::JoinHandle, spawn, time::sleep, sync::{Mutex, OwnedMutexGuard, mpsc::{unbounded_channel, UnboundedReceiver}}};
-
+use axum::{
+    async_trait,
+    extract::ws::{CloseFrame, Message, WebSocket},
+};
+use tokio::{
+    spawn,
+    sync::{
+        mpsc::{unbounded_channel, UnboundedReceiver},
+        Mutex, OwnedMutexGuard,
+    },
+    task::JoinHandle,
+    time::sleep,
+};
 
 const WEBSOCKET_POLL_DELAY: Duration = Duration::from_secs(45);
 const WEBSOCKET_PING: &str = "PING!!";
 
-
 struct EmptyBorrowedWebSocketImpl {
     guard: OwnedMutexGuard<Option<WebSocket>>,
     poller: JoinHandle<()>,
-    failed_receiver: UnboundedReceiver<()>
+    failed_receiver: UnboundedReceiver<()>,
 }
-
 
 /// A lock of a PolledWebSocket that does not contain a WebSocket
-/// 
+///
 /// The Websocket can be replaced to allows the polling thread to continue
 /// when the lock is dropped
-/// 
+///
 /// The WebSocket is not polled for as long as this struct is alive
 pub struct EmptyBorrowedWebSocket {
-    inner: Option<EmptyBorrowedWebSocketImpl>
+    inner: Option<EmptyBorrowedWebSocketImpl>,
 }
-
 
 struct BorrowedWebSocketImpl {
     guard: OwnedMutexGuard<Option<WebSocket>>,
     ws: WebSocket,
     poller: JoinHandle<()>,
-    failed_receiver: UnboundedReceiver<()>
+    failed_receiver: UnboundedReceiver<()>,
 }
 
-
 /// A lock of a PolledWebSocket where ownership of the WebSocket is guaranteed
-/// 
+///
 /// As a result, this struct dereferences to a WebSocket
-/// 
+///
 /// The WebSocket is not polled for as long as this struct is alive
 pub struct BorrowedWebSocket {
     // Always Some except in Drop
-    inner: Option<BorrowedWebSocketImpl>
+    inner: Option<BorrowedWebSocketImpl>,
 }
-
 
 struct PolledWebSocketImpl {
     lock: Arc<Mutex<Option<WebSocket>>>,
     poller: JoinHandle<()>,
-    failed_receiver: UnboundedReceiver<()>
+    failed_receiver: UnboundedReceiver<()>,
 }
 
-
 /// A WebSocket that is polled when not locked (ie. when this struct is alive)
-/// 
+///
 /// Polling of a WebSocket allows the connection to remain alive indefinitely,
 /// so long as the other end responds to the polls
 pub struct PolledWebSocket {
-    inner: Option<PolledWebSocketImpl>
+    inner: Option<PolledWebSocketImpl>,
 }
-
 
 impl EmptyBorrowedWebSocket {
     /// Replace the WebSocket so that it can be polled when the lock is dropped
@@ -70,22 +79,17 @@ impl EmptyBorrowedWebSocket {
                 guard: inner.guard,
                 ws,
                 poller: inner.poller,
-                failed_receiver: inner.failed_receiver
-            })
+                failed_receiver: inner.failed_receiver,
+            }),
         }
     }
 }
 
-
 impl Drop for EmptyBorrowedWebSocket {
     fn drop(&mut self) {
-        take(&mut self.inner)
-            .unwrap()
-            .poller
-            .abort();
+        take(&mut self.inner).unwrap().poller.abort();
     }
 }
-
 
 impl BorrowedWebSocket {
     /// Stops the polling thread permanently (it is paused for as long as this struct is alive)
@@ -102,9 +106,9 @@ impl BorrowedWebSocket {
                 inner: Some(EmptyBorrowedWebSocketImpl {
                     guard: inner.guard,
                     poller: inner.poller,
-                    failed_receiver: inner.failed_receiver
-                })
-            }
+                    failed_receiver: inner.failed_receiver,
+                }),
+            },
         )
     }
     /// Unpauses the polling thread
@@ -115,21 +119,19 @@ impl BorrowedWebSocket {
             inner: Some(PolledWebSocketImpl {
                 lock: OwnedMutexGuard::mutex(&inner.guard).clone(),
                 poller: inner.poller,
-                failed_receiver: inner.failed_receiver
-            })
+                failed_receiver: inner.failed_receiver,
+            }),
         }
     }
 }
 
-
 impl Drop for BorrowedWebSocket {
     fn drop(&mut self) {
         let inner = take(&mut self.inner).unwrap();
-       inner.poller.abort();
-       spawn(inner.ws.close());
+        inner.poller.abort();
+        spawn(inner.ws.close());
     }
 }
-
 
 impl Deref for BorrowedWebSocket {
     type Target = WebSocket;
@@ -139,13 +141,11 @@ impl Deref for BorrowedWebSocket {
     }
 }
 
-
 impl DerefMut for BorrowedWebSocket {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner.as_mut().unwrap().ws
     }
 }
-
 
 impl PolledWebSocket {
     /// Wrap the given WebSocket, allowing it to be polled while not locked
@@ -161,19 +161,16 @@ impl PolledWebSocket {
 
                 let mut guard = lock2.lock().await;
 
-                if let Some(ws) = guard.as_mut()
-                {
-                    if ws.send(Message::Ping(WEBSOCKET_PING.as_bytes().into()))
+                if let Some(ws) = guard.as_mut() {
+                    if ws
+                        .send(Message::Ping(WEBSOCKET_PING.as_bytes().into()))
                         .await
                         .is_err()
                     {
-                        take(guard.deref_mut())
-                            .unwrap()
-                            .close_ignored()
-                            .await;
+                        take(guard.deref_mut()).unwrap().close_ignored().await;
                     }
                 } else {
-                    break
+                    break;
                 }
             }
         });
@@ -182,13 +179,13 @@ impl PolledWebSocket {
             inner: Some(PolledWebSocketImpl {
                 lock,
                 poller,
-                failed_receiver
-            })
+                failed_receiver,
+            }),
         }
     }
 
     /// Locks the inner WebSocket, allowing it to be used
-    /// 
+    ///
     /// If None is returned, the WebSocket faced an error the last time it was polled,
     /// rendering it unusable
     pub async fn lock(mut self) -> Option<BorrowedWebSocket> {
@@ -201,8 +198,8 @@ impl PolledWebSocket {
                     guard,
                     ws: ws,
                     poller: inner.poller,
-                    failed_receiver: inner.failed_receiver
-                })
+                    failed_receiver: inner.failed_receiver,
+                }),
             })
         } else {
             None
@@ -215,7 +212,7 @@ impl PolledWebSocket {
     }
 
     /// Stops the polling thread and returns the inner WebSocket
-    /// 
+    ///
     /// If None is returned, the WebSocket faced an error the last time it was polled,
     /// rendering it unusable
     pub async fn into_inner(mut self) -> Option<WebSocket> {
@@ -225,7 +222,6 @@ impl PolledWebSocket {
         take(&mut guard.deref_mut())
     }
 }
-
 
 impl Drop for PolledWebSocket {
     fn drop(&mut self) {
@@ -238,7 +234,6 @@ impl Drop for PolledWebSocket {
         }
     }
 }
-
 
 #[async_trait]
 pub trait WsExt: Sized {
@@ -253,9 +248,12 @@ pub trait WsExt: Sized {
     /// Send one last message and safely drop regardless of what happened
     async fn final_send(self, msg: Message) -> bool;
     /// Send a close frame and safely drop regardless of what happened
-    async fn final_send_close_frame(self, code: u16, reason: impl Into<Cow<'static, str>> + Send + Sync) -> bool;
+    async fn final_send_close_frame(
+        self,
+        code: u16,
+        reason: impl Into<Cow<'static, str>> + Send + Sync,
+    ) -> bool;
 }
-
 
 #[async_trait]
 impl WsExt for WebSocket {
@@ -291,14 +289,18 @@ impl WsExt for WebSocket {
                 ws.close_ignored().await;
                 true
             }
-            None => false
+            None => false,
         }
     }
 
-    async fn final_send_close_frame(self, code: u16, reason: impl Into<Cow<'static, str>> + Send + Sync) -> bool {
-        self.final_send(Message::Close(Some(CloseFrame{
+    async fn final_send_close_frame(
+        self,
+        code: u16,
+        reason: impl Into<Cow<'static, str>> + Send + Sync,
+    ) -> bool {
+        self.final_send(Message::Close(Some(CloseFrame {
             code,
-            reason: reason.into()
+            reason: reason.into(),
         })))
         .await
     }
