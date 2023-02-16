@@ -22,14 +22,15 @@ use tokio::{
 
 use crate::log_targets;
 
-pub const GOOGLE_PROFILE_SCOPES: [&str; 2] = [
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/userinfo.profile",
-];
-pub const GITHUB_PROFILE_SCOPES: [&str; 1] = ["user:email"];
+// pub const GOOGLE_PROFILE_SCOPES: [&str; 2] = [
+//     "https://www.googleapis.com/auth/userinfo.email",
+//     "https://www.googleapis.com/auth/userinfo.profile",
+// ];
+// pub const GITHUB_PROFILE_SCOPES: [&str; 1] = ["user:email"];
 
 /// How much time to wait for authorization to be granted by OAuth
 pub const MAX_AUTH_WAIT_TIME: Duration = Duration::from_secs(180);
+pub use oauth2::TokenResponse;
 
 fn new_oauth_client(
     auth_url: String,
@@ -199,7 +200,7 @@ impl OAuthState {
         &self,
         auth_code: AuthorizationCode,
         csrf_token: CsrfToken,
-        pages: OAuthPages,
+        pages: AuthPages,
     ) -> Html<String> {
         let pending = if let Some(x) = self.pending_auths.lock().remove(csrf_token.secret()) {
             x
@@ -256,7 +257,7 @@ impl<T: OAuthStateContainer> FromRef<T> for OAuthState {
 pub async fn oauth_redirect_handler(
     Query(AuthRedirectParams { state, code }): Query<AuthRedirectParams>,
     State(oauth_state): State<OAuthState>,
-    State(pages): State<OAuthPages>,
+    State(pages): State<AuthPages>,
 ) -> Html<String> {
     oauth_state
         .verify_auth(AuthorizationCode::new(code), CsrfToken::new(state), pages)
@@ -280,20 +281,22 @@ pub mod google {
     use serde_json::from_str;
 
     use super::*;
-    pub type GoogleOAuth = OAuth<true>;
+    #[derive(Clone)]
+    pub struct GoogleOAuth(pub OAuth<true>);
 
     pub trait GAuthContainer {
-        fn get_gauth_state(&self) -> &GoogleOAuth;
+        fn get_gauth(&self) -> &GoogleOAuth;
     }
 
     impl<T: GAuthContainer> FromRef<T> for GoogleOAuth {
         fn from_ref(input: &T) -> Self {
-            input.get_gauth_state().clone()
+            input.get_gauth().clone()
         }
     }
 
     pub fn new_google_oauth_from_file(
         filename: impl AsRef<Path>,
+        redirect_url: impl Into<String>,
         oauth_state: OAuthState,
     ) -> Result<GoogleOAuth> {
         #[derive(Deserialize, Debug)]
@@ -311,14 +314,15 @@ pub mod google {
         let secrets: WebSecret = from_str(&read_to_string(filename)?)?;
         let secrets = secrets.installed;
 
-        Ok(GoogleOAuth::new(
+        Ok(GoogleOAuth(OAuth::new(
             secrets.auth_uri,
             secrets.token_uri,
             secrets.client_id,
             secrets.client_secret,
             Some("https://oauth2.googleapis.com/revoke".to_string()),
+            redirect_url.into(),
             oauth_state,
-        ))
+        )))
     }
 }
 
@@ -328,7 +332,8 @@ pub mod github {
     use serde_json::from_str;
 
     use super::*;
-    pub type GithubOAuth = OAuth<false>;
+    #[derive(Clone)]
+    pub struct GithubOAuth(pub OAuth<false>);
 
     pub trait GithubOAuthContainer {
         fn get_github_auth_state(&self) -> &GithubOAuth;
@@ -342,6 +347,7 @@ pub mod github {
 
     pub fn new_github_oauth_from_file(
         filename: impl AsRef<Path>,
+        redirect_url: impl Into<String>,
         oauth_state: OAuthState,
     ) -> Result<GithubOAuth> {
         #[derive(Deserialize, Debug)]
@@ -352,13 +358,14 @@ pub mod github {
 
         let secrets: ClientSecret = from_str(&read_to_string(filename)?)?;
 
-        Ok(GithubOAuth::new(
+        Ok(GithubOAuth(OAuth::new(
             "https://github.com/login/oauth/authorize".to_string(),
             "https://github.com/login/oauth/access_token".to_string(),
             secrets.client_id,
             secrets.client_secret,
             None,
+            redirect_url.into(),
             oauth_state,
-        ))
+        )))
     }
 }
