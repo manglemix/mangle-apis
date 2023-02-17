@@ -107,7 +107,7 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
                     ..Default::default()
                 };
 
-                if let Err(_) = db.create_user_profile(email, &profile).await {
+                if let Err(_) = db.create_user_profile(email, profile).await {
                     ws.close_internal_error().await;
                     return
                 }
@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
         goidc: new_google_oidc_from_file(
             config.google_client_secret_path,
             oidc_state.clone(),
-            &config.oidc_redirect,
+            &(config.oidc_redirect_base + "/oidc/redirect"),
         )
         .await
         .context("parsing google oauth")?,

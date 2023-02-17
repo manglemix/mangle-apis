@@ -17,7 +17,6 @@ pub struct UserProfile {
 pub enum GetItemError {
     AWSError(#[from] aws_sdk_dynamodb::error::GetItemError),
     ItemNotFound,
-    EmptyItem,
     DeserializeError { field: &'static str },
 }
 
@@ -80,7 +79,7 @@ impl DB {
             })
         }?;
 
-        let map = item.item().ok_or(GetItemError::EmptyItem)?;
+        let map = item.item().ok_or(GetItemError::ItemNotFound)?;
 
         macro_rules! deser {
             ($field: literal, $op: ident) => {
@@ -112,7 +111,7 @@ impl DB {
     pub async fn create_user_profile(
         &self,
         email: impl Into<String>,
-        profile: &UserProfile
+        profile: UserProfile
     ) -> Result<(), CreateUserProfileError> {
         let email = email.into();
         if !self.regex.is_match(&email) {
@@ -128,6 +127,7 @@ impl DB {
             .item("normal_highscore", AttributeValue::N(profile.normal_highscore.to_string()))
             .item("expert_highscore", AttributeValue::N(profile.expert_highscore.to_string()))
             .item("tournament_wins", AttributeValue::N(profile.tournament_wins.to_string()))
+            .item("username", AttributeValue::N(profile.username))
             .send()
             .await
             .map_err(|e| e.into_service_error())

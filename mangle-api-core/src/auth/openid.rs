@@ -258,11 +258,11 @@ pub mod google {
         }
         #[derive(Deserialize)]
         struct WebSecret {
-            installed: ClientSecret,
+            web: ClientSecret,
         }
 
         let secrets: WebSecret = from_str(&read_to_string(filename)?)?;
-        let secrets = secrets.installed;
+        let secrets = secrets.web;
 
         Ok(GoogleOIDC(
             OIDC::new(

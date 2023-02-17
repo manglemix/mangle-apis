@@ -8,4 +8,10 @@ RUN echo 'source $HOME/.cargo/env' >> $HOME/.bashr
 RUN yum install xz tar -y
 RUN curl -OL https://github.com/upx/upx/releases/download/v4.0.2/upx-4.0.2-amd64_linux.tar.xz
 RUN tar -xf /upx-4.0.2-amd64_linux.tar.xz && rm upx-4.0.2-amd64_linux.tar.xz
-RUN export PATH=/upx-4.0.2-amd64_linux:$PATH
+ENV PATH="${PATH}:/upx-4.0.2-amd64_linux"
+
+RUN yum install llvm -y
+
+COPY bashrc_append /
+# Append bashrc
+RUN ["/bin/bash", "-c", "cat /bashrc_append >> /root/.bashrc && rm /bashrc_append"]
