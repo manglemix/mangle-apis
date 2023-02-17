@@ -263,6 +263,9 @@ pub trait WsExt: Sized {
     async fn close_bad_payload(self) -> bool {
         self.final_send_close_frame(1007, "Bad Payload").await
     }
+    async fn close_bad_payload_msg(self, msg: impl Into<Cow<'static, str>> + Send + Sync) -> bool {
+        self.final_send_close_frame(1007, msg).await
+    }
     async fn close_success(self) -> bool {
         self.final_send_close_frame(1000, "").await
     }

@@ -4,26 +4,6 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-        
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in library 'mangle-api-core'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--lib",
-                    "--package=mangle-api-core"
-                ],
-                "filter": {
-                    "name": "mangle-api-core",
-                    "kind": "lib"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        },
         {
             "type": "lldb",
             "request": "launch",
@@ -42,24 +22,5 @@
             "args": ["start"],
             "cwd": "${workspaceFolder}/test_ws/us"
         },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in executable 'bola-api'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--bin=bola-api",
-                    "--package=bola-api"
-                ],
-                "filter": {
-                    "name": "bola-api",
-                    "kind": "bin"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        }
     ]
 }

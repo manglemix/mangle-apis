@@ -18,7 +18,7 @@ use mangle_api_core::{
     get_pipe_name, make_app, openid_redirect, pre_matches, start_api,
     tokio::{self, select},
     ws::{PolledWebSocket, WsExt},
-    BaseConfig, BindAddress,
+    BaseConfig, BindAddress, serde_json,
 };
 
 mod config;
@@ -83,31 +83,59 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
         };
 
         match db.get_user_profile(&email).await {
-            Ok(x) => {
-                let Some(ws_tmp) = ws.easy_send(Message::Text(x.username)).await else { return };
+            Ok(ref x) => {
+                let Some(ws_tmp) = ws.easy_send(Message::Text(serde_json::to_string(x).unwrap())).await else { return };
                 ws = ws_tmp;
             }
             Err(GetUserProfileError::GetItemError(GetItemError::ItemNotFound)) => {
                 let Some(ws_tmp) = ws.easy_send(Message::Text("Sign Up".into())).await else { return };
-                let Some((ws_tmp, msg)) = ws_tmp.easy_recv().await else { return };
                 ws = ws_tmp;
+                let mut profile;
 
-                let Message::Text(username) = msg else {
-                    ws.final_send_close_frame(1007, "Expected username").await;
-                    return
-                };
+                loop {
+                    let Some((ws_tmp, msg)) = ws.easy_recv().await else { return };
+                    ws = ws_tmp;
 
-                if username.is_inappropriate() {
-                    ws.final_send_close_frame(1007, "Inappropriate username").await;
-                    return
+                    let Message::Text(msg) = msg else {
+                        ws.final_send_close_frame(1007, "Expected profile").await;
+                        return
+                    };
+
+                    let Ok(tmp_profile) = serde_json::from_str::<UserProfile>(&msg) else {
+                        ws.close_bad_payload().await;
+                        return
+                    };
+                    profile = tmp_profile;
+
+                    if profile.username.is_inappropriate() {
+                        let Some(ws_tmp) = ws.easy_send("Inappropriate username".into()).await else {
+                            return
+                        };
+                        ws = ws_tmp;
+                        continue
+                    }
+
+                    match db.is_username_taken(&profile.username).await {
+                        Ok(true) => {
+                            let Some(ws_tmp) = ws.easy_send("Username already used".into()).await else {
+                                return
+                            };
+                            ws = ws_tmp;
+                            continue
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            eprintln!("{e:?}");
+                            ws.close_internal_error().await;
+                            return
+                        }
+                    };
+
+                    break
                 }
 
-                let profile = UserProfile {
-                    username,
-                    ..Default::default()
-                };
-
-                if let Err(_) = db.create_user_profile(email, profile).await {
+                if let Err(e) = db.create_user_profile(email, profile).await {
+                    eprintln!("{e:?}");
                     ws.close_internal_error().await;
                     return
                 }
@@ -133,14 +161,12 @@ async fn main() -> anyhow::Result<()> {
         return Ok(())
     };
 
-    #[cfg(debug_assertions)]
-    let aws_config = aws_types::sdk_config::Builder::default()
-        .region(aws_sdk_dynamodb::Region::new("us-west-1"))
-        // .credentials_cache(CredentialsCache::lazy())
-        .build();
+    let builder = aws_config::from_env();
 
-    #[cfg(not(debug_assertions))]
-    let aws_config = aws_config::load_from_env().await;
+    #[cfg(debug_assertions)]
+    let builder = builder.region(aws_types::region::Region::from_static("us-east-2"));
+
+    let aws_config = builder.load().await;
 
     let oidc_state = OIDCState::default();
 

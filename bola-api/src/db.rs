@@ -1,16 +1,26 @@
-use aws_sdk_dynamodb::{model::AttributeValue, Client, error::{GetItemErrorKind, PutItemErrorKind}};
+use aws_sdk_dynamodb::{model::AttributeValue, Client, error::{GetItemErrorKind, PutItemErrorKind, QueryErrorKind}};
 use aws_types::SdkConfig;
-use mangle_api_core::{derive_more::Display, regex::Regex, serde::{Deserialize, self}};
+use mangle_api_core::{derive_more::Display, serde::{Deserialize, self, Serialize}};
 use thiserror::Error;
+// use mangle_api_core::regex::Regex;
 
-#[derive(Debug, Default, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
 #[serde(crate = "serde")]
 pub struct UserProfile {
     pub username: String,
+    #[serde(default = "Default::default")]
     pub easy_highscore: u16,
+    #[serde(default = "Default::default")]
     pub normal_highscore: u16,
+    #[serde(default = "Default::default")]
     pub expert_highscore: u16,
+    #[serde(default = "Default::default")]
     pub tournament_wins: u16,
+}
+
+#[derive(Error, Debug, Display)]
+pub enum CheckUsernameError {
+    AWSError(#[from] aws_sdk_dynamodb::error::QueryError),
 }
 
 #[derive(Error, Debug, Display)]
@@ -42,7 +52,7 @@ pub enum CreateUserProfileError {
 pub struct DB {
     client: Client,
     bola_profiles_table: String,
-    regex: Regex
+    // regex: Regex
 }
 
 impl DB {
@@ -50,7 +60,24 @@ impl DB {
         Self {
             client: Client::new(config),
             bola_profiles_table,
-            regex: Regex::new(r"^.*@gmail.com$").expect("regex to be correct")
+            // regex: Regex::new(r"^.*@gmail.com$").expect("regex to be correct")
+        }
+    }
+
+    pub async fn is_username_taken(&self, username: impl Into<String>) -> Result<bool, CheckUsernameError> {
+        match self
+            .client
+            .query()
+            .table_name(self.bola_profiles_table.clone())
+            .index_name("username-index")
+            .key_condition_expression("username = :check_username")
+            .expression_attribute_values(":check_username", AttributeValue::S(username.into()))
+            .send()
+            .await
+            .map_err(|e| e.into_service_error())
+        {
+            Ok(x) => Ok(x.count() > 0),
+            Err(e) => Err(CheckUsernameError::AWSError(e).into())
         }
     }
 
@@ -59,15 +86,15 @@ impl DB {
         email: impl Into<String>,
     ) -> Result<UserProfile, GetUserProfileError> {
         let email = email.into();
-        if !self.regex.is_match(&email) {
-            return Err(GetUserProfileError::NotAnEmail)
-        }
+        // if !self.regex.is_match(&email) {
+        //     return Err(GetUserProfileError::NotAnEmail)
+        // }
 
         let item = match self
             .client
             .get_item()
             .table_name(self.bola_profiles_table.clone())
-            .key("email", AttributeValue::S(email.into()))
+            .key("email", AttributeValue::S(email))
             .send()
             .await
             .map_err(|e| e.into_service_error())
@@ -114,20 +141,20 @@ impl DB {
         profile: UserProfile
     ) -> Result<(), CreateUserProfileError> {
         let email = email.into();
-        if !self.regex.is_match(&email) {
-            return Err(CreateUserProfileError::NotAnEmail)
-        }
+        // if !self.regex.is_match(&email) {
+        //     return Err(CreateUserProfileError::NotAnEmail)
+        // }
 
         match self
             .client
             .put_item()
             .table_name(self.bola_profiles_table.clone())
-            .item("email", AttributeValue::S(email.into()))
+            .item("email", AttributeValue::S(email))
             .item("easy_highscore", AttributeValue::N(profile.easy_highscore.to_string()))
             .item("normal_highscore", AttributeValue::N(profile.normal_highscore.to_string()))
             .item("expert_highscore", AttributeValue::N(profile.expert_highscore.to_string()))
             .item("tournament_wins", AttributeValue::N(profile.tournament_wins.to_string()))
-            .item("username", AttributeValue::N(profile.username))
+            .item("username", AttributeValue::S(profile.username))
             .send()
             .await
             .map_err(|e| e.into_service_error())
