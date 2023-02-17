@@ -21,6 +21,7 @@ pub struct Config {
     pub google_client_secret_path: String,
     #[serde(default = "bola_profiles_table")]
     pub bola_profiles_table: String,
+    pub oidc_redirect: String,
     // pub github_client_secret_path: String,
     pub api_token: String,
     // pub token_duration: u16,

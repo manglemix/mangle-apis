@@ -246,13 +246,27 @@ pub trait WsExt: Sized {
     /// Receive one last message and safely drop regardless of what happened
     async fn final_recv(self) -> Option<Message>;
     /// Send one last message and safely drop regardless of what happened
+    /// 
+    /// Returns true iff the message could not be sent
     async fn final_send(self, msg: Message) -> bool;
     /// Send a close frame and safely drop regardless of what happened
+    /// 
+    /// Returns true iff the message could not be sent
     async fn final_send_close_frame(
         self,
         code: u16,
         reason: impl Into<Cow<'static, str>> + Send + Sync,
     ) -> bool;
+    async fn close_internal_error(self) -> bool {
+        self.final_send_close_frame(1011, "Internal Error").await
+    }
+    async fn close_bad_payload(self) -> bool {
+        self.final_send_close_frame(1007, "Bad Payload").await
+    }
+    async fn close_success(self) -> bool {
+        self.final_send_close_frame(1000, "").await
+    }
+
 }
 
 #[async_trait]

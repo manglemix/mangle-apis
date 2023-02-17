@@ -13,5 +13,15 @@
   "containerEnv": {
     "DISPLAY": "${localEnv:DISPLAY}",
     "LIBGL_ALWAYS_SOFTWARE": "1" // Needed for software rendering of opengl
-  }
+},
+"customizations": {
+	"vscode": {
+		"extensions": [
+			"vadimcn.vscode-lldb",
+			"tamasfe.even-better-toml",
+			"DavidAnson.vscode-markdownlint",
+			"rust-lang.rust-analyzer"
+		]
+	}
+}
 }

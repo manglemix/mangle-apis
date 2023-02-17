@@ -14,3 +14,4 @@ thiserror = "1.0.38"
 # rand = { version = "0.8.5", features = ["std_rng"] }
 aws-sdk-sesv2 = "0.24.0"
 # itertools = "0.10.5"
+rustrict = "0.5.13"

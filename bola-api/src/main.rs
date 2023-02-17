@@ -1,6 +1,5 @@
-use aws_sdk_dynamodb::Region;
 // use aws_config::{SdkConfig};
-use db::DB;
+use db::{DB, GetUserProfileError, UserProfile};
 use mangle_api_core::{
     anyhow::{self, Context},
     auth::{
@@ -26,6 +25,9 @@ mod config;
 mod db;
 
 use config::Config;
+use rustrict::CensorStr;
+
+use crate::db::GetItemError;
 
 #[derive(Clone)]
 struct GlobalState {
@@ -59,7 +61,7 @@ impl OIDCStateContainer for GlobalState {
     }
 }
 
-async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, ws: WebSocketUpgrade) -> Response {
+async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(|ws| async move {
         let (auth_url, fut) = oidc.initiate_auth(["openid", "email"]);
         let Some(ws) = ws.easy_send(Message::Text(auth_url.to_string())).await else { return };
@@ -69,18 +71,54 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, ws: WebSocketUpgrade)
             opt = fut => { opt }
             () = ws.wait_for_failure() => { return }
         };
-        let Some(ws) = ws.into_inner().await else { return };
-
+        let Some(mut ws) = ws.into_inner().await else { return };
 
         let Some(data) = opt else {
             ws.final_send_close_frame(1000, "Auth Failed").await;
             return
         };
         let Some(email) = data.email else {
-            ws.final_send_close_frame(1000, "Missing email").await;
+            ws.close_bad_payload().await;
             return
         };
-        println!("{email:?}");
+
+        match db.get_user_profile(&email).await {
+            Ok(x) => {
+                let Some(ws_tmp) = ws.easy_send(Message::Text(x.username)).await else { return };
+                ws = ws_tmp;
+            }
+            Err(GetUserProfileError::GetItemError(GetItemError::ItemNotFound)) => {
+                let Some(ws_tmp) = ws.easy_send(Message::Text("Sign Up".into())).await else { return };
+                let Some((ws_tmp, msg)) = ws_tmp.easy_recv().await else { return };
+                ws = ws_tmp;
+
+                let Message::Text(username) = msg else {
+                    ws.final_send_close_frame(1007, "Expected username").await;
+                    return
+                };
+
+                if username.is_inappropriate() {
+                    ws.final_send_close_frame(1007, "Inappropriate username").await;
+                    return
+                }
+
+                let profile = UserProfile {
+                    username,
+                    ..Default::default()
+                };
+
+                if let Err(_) = db.create_user_profile(email, &profile).await {
+                    ws.close_internal_error().await;
+                    return
+                }
+            }
+            Err(e) => {
+                eprintln!("{e:?}");
+                ws.close_internal_error().await;
+                return
+            }
+        };
+
         ws.final_send_close_frame(1000, "Auth Succeeded!").await;
     })
 }
@@ -97,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(debug_assertions)]
     let aws_config = aws_types::sdk_config::Builder::default()
-        .region(Region::new("us-west-1"))
+        .region(aws_sdk_dynamodb::Region::new("us-west-1"))
         // .credentials_cache(CredentialsCache::lazy())
         .build();
 
@@ -111,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
         goidc: new_google_oidc_from_file(
             config.google_client_secret_path,
             oidc_state.clone(),
-            "http://localhost/oidc/redirect",
+            &config.oidc_redirect,
         )
         .await
         .context("parsing google oauth")?,

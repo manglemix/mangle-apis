@@ -44,6 +44,7 @@ pub use parking_lot;
 #[cfg(any(feature = "redis"))]
 pub use redis;
 pub use serde;
+pub use regex;
 pub use serde_json;
 pub use tokio;
 pub use toml;
