@@ -18,7 +18,7 @@ use mangle_api_core::{
     get_pipe_name, make_app, openid_redirect, pre_matches, start_api,
     tokio::{self, select},
     ws::{PolledWebSocket, WsExt},
-    BaseConfig, BindAddress, serde_json,
+    BaseConfig, BindAddress, serde_json, log::error,
 };
 
 mod config;
@@ -125,7 +125,7 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
                         }
                         Ok(false) => {}
                         Err(e) => {
-                            eprintln!("{e:?}");
+                            error!(target: "login", "{e:?}");
                             ws.close_internal_error().await;
                             return
                         }
@@ -135,13 +135,13 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
                 }
 
                 if let Err(e) = db.create_user_profile(email, profile).await {
-                    eprintln!("{e:?}");
+                    error!(target: "login", "{e:?}");
                     ws.close_internal_error().await;
                     return
                 }
             }
             Err(e) => {
-                eprintln!("{e:?}");
+                error!(target: "login", "{e:?}");
                 ws.close_internal_error().await;
                 return
             }

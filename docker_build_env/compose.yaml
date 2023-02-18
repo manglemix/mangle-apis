@@ -1,0 +1,37 @@
+services:
+  builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    volumes:
+      - type: bind
+        source: persistent
+        target: /docker_build_env/persistent
+
+      - type: bind
+        source: build.sh
+        target: /docker_build_env/build.sh
+      
+      - type: bind
+        source: ../bola-api
+        target: /docker_build_env/mangle-apis/bola-api
+      
+      - type: bind
+        source: ../mangle-api-core
+        target: /docker_build_env/mangle-apis/mangle-api-core
+      
+      - type: bind
+        source: ../Cargo.lock
+        target: /docker_build_env/mangle-apis/Cargo.lock
+      
+      - type: bind
+        source: ../Cargo.toml
+        target: /docker_build_env/mangle-apis/Cargo.toml
+
+    working_dir: /docker_build_env/mangle-apis
+    environment:
+      - CARGO_HOME=/docker_build_env/persistent/.cargo
+      - CARGO_TARGET_DIR=/docker_build_env/persistent/target
+
+    command: ["/bin/bash", "-i", "../build.sh"]

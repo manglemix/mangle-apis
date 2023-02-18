@@ -1,4 +1,4 @@
-use aws_sdk_dynamodb::{model::AttributeValue, Client, error::{GetItemErrorKind, PutItemErrorKind, QueryErrorKind}};
+use aws_sdk_dynamodb::{model::AttributeValue, Client, error::{GetItemErrorKind, PutItemErrorKind}};
 use aws_types::SdkConfig;
 use mangle_api_core::{derive_more::Display, serde::{Deserialize, self, Serialize}};
 use thiserror::Error;
@@ -38,13 +38,13 @@ pub enum PutItemError {
 #[derive(Error, Debug, Display)]
 pub enum GetUserProfileError {
     GetItemError(#[from] GetItemError),
-    NotAnEmail
+    // NotAnEmail
 }
 
 #[derive(Error, Debug, Display)]
 pub enum CreateUserProfileError {
     PutItemError(#[from] PutItemError),
-    NotAnEmail
+    // NotAnEmail
 }
 
 
