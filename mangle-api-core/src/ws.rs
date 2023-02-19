@@ -227,10 +227,12 @@ impl Drop for PolledWebSocket {
     fn drop(&mut self) {
         if let Some(inner) = take(&mut self.inner) {
             inner.poller.abort();
-            let mut lock = inner.lock.blocking_lock();
-            if let Some(ws) = take(lock.deref_mut()) {
-                spawn(ws.close());
-            }
+            spawn(async move {
+                let mut lock = inner.lock.lock().await;
+                if let Some(ws) = take(lock.deref_mut()) {
+                    ws.close_ignored().await;
+                }
+            });
         }
     }
 }

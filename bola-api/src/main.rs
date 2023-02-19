@@ -1,3 +1,5 @@
+use std::{ops::Deref, time::Duration};
+
 // use aws_config::{SdkConfig};
 use db::{DB, GetUserProfileError, UserProfile};
 use mangle_api_core::{
@@ -7,18 +9,18 @@ use mangle_api_core::{
         openid::{
             google::{new_google_oidc_from_file, GOIDCContainer, GoogleOIDC},
             OIDCState, OIDCStateContainer,
-        },
+        }, token::{VerifiedToken, HeaderTokenGranter},
     },
     axum::{
         extract::{ws::Message, FromRef, State, WebSocketUpgrade},
-        http::HeaderValue,
+        http::{HeaderValue, StatusCode},
         response::Response,
         routing::get,
     },
     get_pipe_name, make_app, openid_redirect, pre_matches, start_api,
     tokio::{self, select},
     ws::{PolledWebSocket, WsExt},
-    BaseConfig, BindAddress, serde_json, log::error,
+    BaseConfig, BindAddress, serde_json, log::error, create_header_token_granter,
 };
 
 mod config;
@@ -29,12 +31,24 @@ use rustrict::CensorStr;
 
 use crate::db::GetItemError;
 
+
+create_header_token_granter!( LoginTokenGranter "LoginToken" 16 String);
+
+
 #[derive(Clone)]
 struct GlobalState {
     db: DB,
     oidc_state: OIDCState,
     goidc: GoogleOIDC,
     auth_pages: AuthPages,
+    login_tokens: LoginTokenGranter
+}
+
+
+impl FromRef<GlobalState> for LoginTokenGranter {
+    fn from_ref(input: &GlobalState) -> Self {
+        input.login_tokens.clone()
+    }
 }
 
 impl FromRef<GlobalState> for DB {
@@ -61,7 +75,7 @@ impl OIDCStateContainer for GlobalState {
     }
 }
 
-async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>, ws: WebSocketUpgrade) -> Response {
+async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>, State(token_granter): State<LoginTokenGranter>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(|ws| async move {
         let (auth_url, fut) = oidc.initiate_auth(["openid", "email"]);
         let Some(ws) = ws.easy_send(Message::Text(auth_url.to_string())).await else { return };
@@ -82,9 +96,12 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
             return
         };
 
-        match db.get_user_profile(&email).await {
+        match db.get_user_profile_by_email(&email).await {
             Ok(ref x) => {
                 let Some(ws_tmp) = ws.easy_send(Message::Text(serde_json::to_string(x).unwrap())).await else { return };
+                let Some(ws_tmp) = ws_tmp.easy_send(Message::Text(
+                    token_granter.create_token(email).to_str().unwrap().into()
+                )).await else { return };
                 ws = ws_tmp;
             }
             Err(GetUserProfileError::GetItemError(GetItemError::ItemNotFound)) => {
@@ -134,11 +151,16 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
                     break
                 }
 
-                if let Err(e) = db.create_user_profile(email, profile).await {
+                if let Err(e) = db.create_user_profile(email.clone(), profile).await {
                     error!(target: "login", "{e:?}");
                     ws.close_internal_error().await;
                     return
                 }
+
+                let Some(ws_tmp) = ws.easy_send(Message::Text(
+                    token_granter.create_token(email).to_str().unwrap().into()
+                )).await else { return };
+                ws = ws_tmp;
             }
             Err(e) => {
                 error!(target: "login", "{e:?}");
@@ -150,6 +172,24 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
         ws.final_send_close_frame(1000, "Auth Succeeded!").await;
     })
 }
+
+
+async fn quick_login(token: VerifiedToken<LoginTokenGranter>, State(db): State<DB>) -> (StatusCode, String) {
+    match db.get_user_profile_by_email(token.item.deref().clone()).await {
+        Ok(ref x) => (StatusCode::OK, serde_json::to_string(x).expect("Correct serialization of UserProfile")),
+        Err(e) => match e {
+            GetUserProfileError::GetItemError(e) => match e {
+                GetItemError::AWSError(_) => (StatusCode::INTERNAL_SERVER_ERROR, String::new()),
+                GetItemError::ItemNotFound => {
+                    token.revoke_token();
+                    (StatusCode::BAD_REQUEST, "User does not exist".into())
+                }
+                GetItemError::DeserializeError { field: _ } => (StatusCode::INTERNAL_SERVER_ERROR, String::new()),
+            }
+        }
+    }
+}
+
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -186,6 +226,7 @@ async fn main() -> anyhow::Result<()> {
             success: "Success".into(),
         }),
         oidc_state,
+        login_tokens: LoginTokenGranter::new(Duration::from_secs(config.token_duration as u64))
     };
 
     let config = BaseConfig {
@@ -224,11 +265,15 @@ async fn main() -> anyhow::Result<()> {
         app,
         pipe_name,
         config,
-        ["^/oidc/"],
+        [
+            "^/oidc/",
+            "^/login$"
+        ],
         [
             ("/oidc/redirect", openid_redirect!()),
             // ("/sign_up", post(sign_up)),
             ("/login", get(login)),
+            ("/quick_login", get(quick_login)),
         ],
     )
     .await

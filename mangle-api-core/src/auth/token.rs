@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap, hash::Hash, marker::PhantomData, ops::Deref, sync::Arc, time::Duration,
+    collections::HashMap, sync::Arc, time::Duration,
 };
 
 use axum::{
@@ -15,64 +15,73 @@ use tokio::{
     time::sleep,
 };
 
-#[derive(Clone, Hash)]
-pub struct Token<const N: u8>(HeaderValue);
+// #[derive(Clone, Hash)]
+// pub struct Token<const N: u8>(HeaderValue);
 
-impl<const N: u8> Into<String> for Token<N> {
-    fn into(self) -> String {
-        unsafe { String::from_utf8_unchecked(self.0.as_bytes().into()) }
-    }
-}
+// impl<const N: u8> Into<String> for Token<N> {
+//     fn into(self) -> String {
+//         unsafe { String::from_utf8_unchecked(self.0.as_bytes().into()) }
+//     }
+// }
 
-impl<const N: u8> TryFrom<HeaderValue> for Token<N> {
-    type Error = HeaderValue;
+// impl<const N: u8> TryFrom<HeaderValue> for Token<N> {
+//     type Error = HeaderValue;
 
-    fn try_from(value: HeaderValue) -> Result<Self, Self::Error> {
-        if value.len() != N as usize {
-            Err(value)
-        } else {
-            Ok(Self(value))
-        }
-    }
-}
+//     fn try_from(value: HeaderValue) -> Result<Self, Self::Error> {
+//         if value.len() != N as usize {
+//             Err(value)
+//         } else {
+//             Ok(Self(value))
+//         }
+//     }
+// }
 
-#[derive(Clone)]
-pub struct TokenGranter<const N: u8, T: Send + Sync + 'static> {
-    // When the sender gets dropped, the task responsible for expiring the token will also complete
-    tokens: Arc<Mutex<HashMap<HeaderValue, (Sender<()>, Arc<T>)>>>,
+
+struct TokenGranterImpl<T: Send + Sync + 'static> {
+    // When the sender gets dropped, the task responsible for expiring the token will complete
+    tokens: Mutex<HashMap<HeaderValue, (Sender<()>, Arc<T>)>>,
     token_duration: Duration,
 }
 
-impl<const N: u8, T: Send + Sync + 'static> TokenGranter<N, T> {
+
+#[derive(Clone)]
+pub struct BasicTokenGranter<T: Send + Sync + 'static> {
+    inner: Arc<TokenGranterImpl<T>>
+}
+
+impl<T: Send + Sync + 'static> BasicTokenGranter<T> {
     pub fn new(token_duration: Duration) -> Self {
         Self {
-            tokens: Default::default(),
-            token_duration,
+            inner: Arc::new(TokenGranterImpl {
+                tokens: Default::default(),
+                token_duration,
+            })
         }
     }
 
-    pub fn create_token(&self, item: T) -> Token<N> {
+    pub fn create_token<const N: u8>(&self, item: T) -> HeaderValue {
         let bytes: Vec<u8> = thread_rng()
             .sample_iter(&Alphanumeric)
             .take(N as usize)
             .collect();
 
-        let token = unsafe { Token(HeaderValue::from_maybe_shared_unchecked(bytes)) };
+        let token = unsafe { HeaderValue::from_maybe_shared_unchecked(bytes) };
 
         let (sender, receiver) = channel();
 
-        self.tokens
+        self.inner
+            .tokens
             .lock()
-            .insert(token.0.clone(), (sender, Arc::new(item)));
+            .insert(token.clone(), (sender, Arc::new(item)));
 
         let token2 = token.clone();
-        let token_duration = self.token_duration;
-        let tokens = self.tokens.clone();
+        let token_duration = self.inner.token_duration;
+        let inner = self.inner.clone();
 
         spawn(async move {
             tokio::select! {
                 () = sleep(token_duration) => {
-                    tokens.lock().remove(&token2.0);
+                    inner.tokens.lock().remove(&token2);
                 }
                 _ = receiver => { }
             }
@@ -81,38 +90,60 @@ impl<const N: u8, T: Send + Sync + 'static> TokenGranter<N, T> {
         token
     }
 
-    pub fn revoke_token(&self, token: &Token<N>) -> Option<Arc<T>> {
-        self.tokens.lock().remove(&token.0).unzip().1
+    pub fn revoke_token(&self, token: &HeaderValue) -> Option<Arc<T>> {
+        self.inner.tokens.lock().remove(token).unzip().1
+    }
+
+    pub fn verify_token(&self, token: &HeaderValue) -> Option<Arc<T>> {
+        self
+            .inner
+            .tokens
+            .lock()
+            .get(token)
+            .map(|x| x.1.clone())
     }
 }
 
-pub trait HeaderTokenGranter<const N: u8, T: Send + Sync + 'static>:
-    Deref<Target = TokenGranter<N, T>>
+pub trait HeaderTokenGranter
 {
+    type AssociatedDataType: Send + Sync + 'static;
+    const TOKEN_LENGTH: u8;
     const HEADER_NAME: &'static str;
+
+    fn create_token(&self, item: Self::AssociatedDataType) -> HeaderValue;
+
+    fn revoke_token(&self, token: &HeaderValue) -> Option<Arc<Self::AssociatedDataType>>;
+
+    fn verify_token(&self, token: &HeaderValue) -> Option<Arc<Self::AssociatedDataType>>;
 }
 
 #[macro_export]
 macro_rules! create_header_token_granter {
     ($vis: vis $name: ident $header_name: literal $token_length: literal $item_type: ty) => {
         #[derive(Clone)]
-        $vis struct $name($crate::auth::token::TokenGranter<$token_length, $item_type>);
+        $vis struct $name($crate::auth::token::BasicTokenGranter<$item_type>);
 
-        impl std::ops::Deref for $name {
-            type Target = $crate::auth::token::TokenGranter<$token_length, $item_type>;
-
-            fn deref(&self) -> &Self::Target {
-                &self.0
-            }
-        }
-
-        impl $crate::auth::token::HeaderTokenGranter<$token_length, $item_type> for $name {
+        impl $crate::auth::token::HeaderTokenGranter for $name {
+            type AssociatedDataType = $item_type;
+            const TOKEN_LENGTH: u8 = $token_length;
             const HEADER_NAME: &'static str = $header_name;
+
+            fn create_token(&self, item: Self::AssociatedDataType) -> HeaderValue {
+                self.0.create_token::<{Self::TOKEN_LENGTH}>(item)
+            }
+        
+            fn revoke_token(&self, token: &HeaderValue) -> Option<std::sync::Arc<Self::AssociatedDataType>> {
+                self.0.revoke_token(token)
+            }
+
+            fn verify_token(&self, token: &HeaderValue) -> Option<std::sync::Arc<Self::AssociatedDataType>> {
+                self.0.verify_token(token)
+            }
         }
 
         impl $name {
             pub fn new(token_duration: std::time::Duration) -> Self {
-                Self($crate::auth::token::TokenGranter::new(token_duration))
+                Self($crate::auth::token::BasicTokenGranter::new(token_duration))
             }
         }
     };
@@ -120,32 +151,38 @@ macro_rules! create_header_token_granter {
 
 pub use create_header_token_granter;
 
-pub struct VerifiedToken<const N: u8, T: Send + Sync + 'static, TG: HeaderTokenGranter<N, T>> {
-    pub token: Token<N>,
-    pub item: Arc<T>,
-    _phantom: PhantomData<TG>,
+pub struct VerifiedToken<TG: HeaderTokenGranter> {
+    pub token: HeaderValue,
+    pub item: Arc<TG::AssociatedDataType>,
+    granter: TG
 }
 
+
+impl<TG: HeaderTokenGranter> VerifiedToken<TG> {
+    pub fn revoke_token(self) {
+        self.granter.revoke_token(&self.token);
+    }
+}
+
+
 #[async_trait]
-impl<S: Sync, const N: u8, T: Send + Sync + 'static, TG: HeaderTokenGranter<N, T> + FromRef<S>>
-    FromRequestParts<S> for VerifiedToken<N, T, TG>
+impl<S: Sync, TG: HeaderTokenGranter + FromRef<S>>
+    FromRequestParts<S> for VerifiedToken<TG>
 {
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         if let Some(token) = parts.headers.get(TG::HEADER_NAME) {
-            if token.len() != N as usize {
+            if token.len() != TG::TOKEN_LENGTH as usize {
                 return Err((StatusCode::BAD_REQUEST, "Invalid length for token".into()));
             }
 
-            let tokens = TG::from_ref(state);
-            let lock = tokens.tokens.lock();
-
-            if let Some((_, item)) = lock.get(token) {
+            let granter = TG::from_ref(state);
+            if let Some(item) = granter.verify_token(token) {
                 Ok(Self {
-                    token: Token(token.to_owned()),
-                    item: item.clone(),
-                    _phantom: Default::default(),
+                    token: token.to_owned(),
+                    item,
+                    granter,
                 })
             } else {
                 Err((StatusCode::UNAUTHORIZED, "Invalid or expired token".into()))

@@ -24,7 +24,8 @@ pub struct Config {
     pub oidc_redirect_base: String,
     // pub github_client_secret_path: String,
     pub api_token: String,
-    // pub token_duration: u16,
+    #[serde(default = "token_duration")]
+    pub token_duration: u64,
 }
 
 // impl BaseConfig for Config {
@@ -98,4 +99,9 @@ fn suspicious_security_log() -> String {
 
 fn bola_profiles_table() -> String {
     "bola_profiles".into()
+}
+
+fn token_duration() -> u64 {
+    // 30 days
+    60 * 60 * 24 * 30
 }

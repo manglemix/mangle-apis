@@ -55,30 +55,42 @@ where
                     .unwrap())
             };
         }
-
-        if !self.public_paths.is_match(request.uri().path())
-            && !request
-                .headers()
-                .get("Authorization")
-                .map(|x| {
-                    let x = match x.to_str() {
-                        Ok(x) => x,
-                        Err(_) => return false,
-                    };
-
-                    if !x.starts_with("Bearer ") {
-                        return false;
-                    }
-
-                    let token = x.split_at(7).1;
-
-                    constant_time_eq(token.as_bytes(), self.api_token.as_bytes())
-                })
-                .unwrap_or(false)
-        {
-            unauthorized!()
+        if self.public_paths.is_match(request.uri().path()) {
+            return Ok(())
         }
 
-        Ok(())
+        match request.headers().get("Authorization") {
+            Some(header) => {
+                let header = match header.to_str() {
+                    Ok(x) => x,
+                    Err(_) => unauthorized!()
+                };
+
+                if !header.starts_with("Bearer ") {
+                    unauthorized!()
+                }
+
+                let token = header.split_at(7).1;
+
+                if constant_time_eq(token.as_bytes(), self.api_token.as_bytes()) {
+                    Ok(())
+                } else {
+                    unauthorized!()
+                }
+            }
+            None => {
+                if let Some(query) = request.uri().query() {
+                    if query.contains(
+                        &format!(
+                            "Bearer {}",
+                            self.api_token.to_str().expect("API Token to be utf-8")
+                        )
+                    ) {
+                        return Ok(())
+                    }
+                }
+                unauthorized!()
+            }
+        }
     }
 }
