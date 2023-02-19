@@ -19,7 +19,8 @@ use mangle_api_core::{
     },
     get_pipe_name, make_app, openid_redirect, pre_matches, start_api,
     tokio::{self, select},
-    ws::{PolledWebSocket, WsExt},
+    ws::{ManagedWebSocket, WebSocketCode},
+    // ws::{PolledWebSocket, WsExt, ManagedWebSocket, WebSocketCode},
     BaseConfig, BindAddress, serde_json, log::error, create_header_token_granter,
 };
 
@@ -32,7 +33,7 @@ use rustrict::CensorStr;
 use crate::db::GetItemError;
 
 
-create_header_token_granter!( LoginTokenGranter "LoginToken" 16 String);
+create_header_token_granter!( LoginTokenGranter "LoginToken" 32 String);
 
 
 #[derive(Clone)]
@@ -78,54 +79,56 @@ impl OIDCStateContainer for GlobalState {
 async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>, State(token_granter): State<LoginTokenGranter>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(|ws| async move {
         let (auth_url, fut) = oidc.initiate_auth(["openid", "email"]);
-        let Some(ws) = ws.easy_send(Message::Text(auth_url.to_string())).await else { return };
+        let ws = ManagedWebSocket::new(ws, Duration::from_secs(45));
 
-        let mut ws = PolledWebSocket::new(ws);
+        let Some(ws) = ws.send(auth_url.to_string()) else { return };
+        let mut ws = Some(ws);
+
         let opt = select! {
             opt = fut => { opt }
-            () = ws.wait_for_failure() => { return }
+            () = ManagedWebSocket::loop_recv(&mut ws, None) => { return }
         };
-        let Some(mut ws) = ws.into_inner().await else { return };
+        let mut ws = ws.unwrap();
 
         let Some(data) = opt else {
-            ws.final_send_close_frame(1000, "Auth Failed").await;
+            ws.close_frame(WebSocketCode::Ok, "Auth Failed");
             return
         };
         let Some(email) = data.email else {
-            ws.close_bad_payload().await;
+            ws.close_frame(WebSocketCode::BadPayload, "Auth Failed");
             return
         };
 
         match db.get_user_profile_by_email(&email).await {
             Ok(ref x) => {
-                let Some(ws_tmp) = ws.easy_send(Message::Text(serde_json::to_string(x).unwrap())).await else { return };
-                let Some(ws_tmp) = ws_tmp.easy_send(Message::Text(
-                    token_granter.create_token(email).to_str().unwrap().into()
-                )).await else { return };
+                let Some(ws_tmp) = ws.send(serde_json::to_string(x).unwrap()) else { return };
+                let Some(ws_tmp) = ws_tmp.send(
+                    token_granter.create_token(email).to_str().unwrap()
+                ) else { return };
                 ws = ws_tmp;
             }
             Err(GetUserProfileError::GetItemError(GetItemError::ItemNotFound)) => {
-                let Some(ws_tmp) = ws.easy_send(Message::Text("Sign Up".into())).await else { return };
+                let Some(ws_tmp) = ws.send("Sign Up") else { return };
                 ws = ws_tmp;
                 let mut profile;
 
                 loop {
-                    let Some((ws_tmp, msg)) = ws.easy_recv().await else { return };
+                    let Some((ws_tmp, msg)) = ws.recv().await else { return };
                     ws = ws_tmp;
 
                     let Message::Text(msg) = msg else {
-                        ws.final_send_close_frame(1007, "Expected profile").await;
+                        ws.close_frame(WebSocketCode::BadPayload, "Expected profile");
                         return
                     };
 
                     let Ok(tmp_profile) = serde_json::from_str::<UserProfile>(&msg) else {
-                        ws.close_bad_payload().await;
+                        ws.close_frame(WebSocketCode::BadPayload, "");
                         return
                     };
                     profile = tmp_profile;
 
                     if profile.username.is_inappropriate() {
-                        let Some(ws_tmp) = ws.easy_send("Inappropriate username".into()).await else {
+                        let Some(ws_tmp) = ws.send("Inappropriate username") else {
                             return
                         };
                         ws = ws_tmp;
@@ -134,7 +137,7 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
 
                     match db.is_username_taken(&profile.username).await {
                         Ok(true) => {
-                            let Some(ws_tmp) = ws.easy_send("Username already used".into()).await else {
+                            let Some(ws_tmp) = ws.send("Username already used") else {
                                 return
                             };
                             ws = ws_tmp;
@@ -143,7 +146,7 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
                         Ok(false) => {}
                         Err(e) => {
                             error!(target: "login", "{e:?}");
-                            ws.close_internal_error().await;
+                            ws.close_frame(WebSocketCode::InternalError, "");
                             return
                         }
                     };
@@ -153,23 +156,23 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
 
                 if let Err(e) = db.create_user_profile(email.clone(), profile).await {
                     error!(target: "login", "{e:?}");
-                    ws.close_internal_error().await;
+                    ws.close_frame(WebSocketCode::InternalError, "");
                     return
                 }
 
-                let Some(ws_tmp) = ws.easy_send(Message::Text(
-                    token_granter.create_token(email).to_str().unwrap().into()
-                )).await else { return };
+                let Some(ws_tmp) = ws.send(
+                    token_granter.create_token(email).to_str().unwrap()
+                ) else { return };
                 ws = ws_tmp;
             }
             Err(e) => {
                 error!(target: "login", "{e:?}");
-                ws.close_internal_error().await;
+                ws.close_frame(WebSocketCode::InternalError, "");
                 return
             }
         };
 
-        ws.final_send_close_frame(1000, "Auth Succeeded!").await;
+        ws.close_frame(WebSocketCode::Ok, "");
     })
 }
 
@@ -266,8 +269,7 @@ async fn main() -> anyhow::Result<()> {
         pipe_name,
         config,
         [
-            "^/oidc/",
-            "^/login$"
+            "^/oidc/"
         ],
         [
             ("/oidc/redirect", openid_redirect!()),

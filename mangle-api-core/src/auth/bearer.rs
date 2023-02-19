@@ -82,7 +82,7 @@ where
                 if let Some(query) = request.uri().query() {
                     if query.contains(
                         &format!(
-                            "Bearer {}",
+                            "api_token={}",
                             self.api_token.to_str().expect("API Token to be utf-8")
                         )
                     ) {
