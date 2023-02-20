@@ -1,7 +1,7 @@
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use axum::{
-    extract::{FromRef, Query, State},
+    extract::{Query, State},
     response::Html,
 };
 use openid::{error::ClientError, DiscoveredClient, Options};
@@ -193,16 +193,6 @@ pub struct AuthRedirectParams {
     code: String,
 }
 
-pub trait OIDCStateContainer {
-    fn get_oidc_state(&self) -> &OIDCState;
-}
-
-impl<T: OIDCStateContainer> FromRef<T> for OIDCState {
-    fn from_ref(input: &T) -> Self {
-        input.get_oidc_state().clone()
-    }
-}
-
 pub async fn oidc_redirect_handler(
     Query(AuthRedirectParams { state, code }): Query<AuthRedirectParams>,
     State(oauth_state): State<OIDCState>,
@@ -235,16 +225,6 @@ pub mod google {
     use super::*;
     #[derive(Clone)]
     pub struct GoogleOIDC(pub OIDC);
-
-    pub trait GOIDCContainer {
-        fn get_goidc(&self) -> &GoogleOIDC;
-    }
-
-    impl<T: GOIDCContainer> FromRef<T> for GoogleOIDC {
-        fn from_ref(input: &T) -> Self {
-            input.get_goidc().clone()
-        }
-    }
 
     pub async fn new_google_oidc_from_file(
         filename: impl AsRef<Path>,

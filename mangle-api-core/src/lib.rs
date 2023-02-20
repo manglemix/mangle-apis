@@ -3,7 +3,8 @@ use axum::routing::MethodRouter;
 use axum::{Router, Server};
 
 pub mod auth;
-pub mod sync;
+// pub mod sync;
+pub mod distributed;
 pub mod ws;
 
 #[cfg(any(feature = "redis"))]
@@ -44,6 +45,7 @@ pub use parking_lot;
 #[cfg(any(feature = "redis"))]
 pub use redis;
 pub use serde;
+pub use bimap;
 pub use regex;
 pub use serde_json;
 pub use tokio;

@@ -67,13 +67,3 @@ impl AuthPages {
         self.success = Cow::Owned(success)
     }
 }
-
-pub trait AuthPagesContainer {
-    fn get_auth_pages(&self) -> &AuthPages;
-}
-
-impl<'a, T: AuthPagesContainer> FromRef<T> for AuthPages {
-    fn from_ref(input: &T) -> Self {
-        input.get_auth_pages().clone()
-    }
-}

@@ -1,14 +1,15 @@
-use std::{ops::Deref, time::Duration};
+use std::{ops::Deref, time::Duration, net::ToSocketAddrs};
 
 // use aws_config::{SdkConfig};
 use db::{DB, UserProfile};
+use leaderboard::Leaderboard;
 use mangle_api_core::{
     anyhow::{self, Context},
     auth::{
-        auth_pages::{AuthPages, AuthPagesContainer, AuthPagesSrc},
+        auth_pages::{AuthPages, AuthPagesSrc},
         openid::{
-            google::{new_google_oidc_from_file, GOIDCContainer, GoogleOIDC},
-            OIDCState, OIDCStateContainer,
+            google::{new_google_oidc_from_file, GoogleOIDC},
+            OIDCState,
         }, token::{VerifiedToken, HeaderTokenGranter},
     },
     axum::{
@@ -20,15 +21,16 @@ use mangle_api_core::{
     get_pipe_name, make_app, openid_redirect, pre_matches, start_api,
     tokio::{self, select},
     ws::{ManagedWebSocket, WebSocketCode},
-    // ws::{PolledWebSocket, WsExt, ManagedWebSocket, WebSocketCode},
-    BaseConfig, BindAddress, serde_json, log::error, create_header_token_granter,
+    BaseConfig, BindAddress, serde_json, log::error, create_header_token_granter, distributed::Node,
 };
 
 mod config;
 mod db;
 mod leaderboard;
+mod network;
 
 use config::Config;
+use network::NetworkMessage;
 use rustrict::CensorStr;
 
 
@@ -41,7 +43,9 @@ struct GlobalState {
     oidc_state: OIDCState,
     goidc: GoogleOIDC,
     auth_pages: AuthPages,
-    login_tokens: LoginTokenGranter
+    login_tokens: LoginTokenGranter,
+    node: Node<NetworkMessage>,
+    leaderboard: Leaderboard
 }
 
 
@@ -57,23 +61,25 @@ impl FromRef<GlobalState> for DB {
     }
 }
 
-impl GOIDCContainer for GlobalState {
-    fn get_goidc(&self) -> &GoogleOIDC {
-        &self.goidc
+impl FromRef<GlobalState> for GoogleOIDC {
+    fn from_ref(input: &GlobalState) -> Self {
+        input.goidc.clone()
     }
 }
 
-impl AuthPagesContainer for GlobalState {
-    fn get_auth_pages(&self) -> &AuthPages {
-        &self.auth_pages
+impl FromRef<GlobalState> for AuthPages {
+    fn from_ref(input: &GlobalState) -> Self {
+        input.auth_pages.clone()
     }
 }
 
-impl OIDCStateContainer for GlobalState {
-    fn get_oidc_state(&self) -> &OIDCState {
-        &self.oidc_state
+
+impl FromRef<GlobalState> for OIDCState {
+    fn from_ref(input: &GlobalState) -> Self {
+        input.oidc_state.clone()
     }
 }
+
 
 async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>, State(token_granter): State<LoginTokenGranter>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(|ws| async move {
@@ -201,16 +207,16 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let builder = aws_config::from_env();
-
     #[cfg(debug_assertions)]
     let builder = builder.region(aws_types::region::Region::from_static("us-east-2"));
-
     let aws_config = builder.load().await;
 
     let oidc_state = OIDCState::default();
 
+    let node = Node::new(config.sibling_domains.into_iter().collect(), config.network_port).await?;
+    let db = DB::new(&aws_config, config.bola_profiles_table);
+
     let state = GlobalState {
-        db: DB::new(&aws_config, config.bola_profiles_table),
         goidc: new_google_oidc_from_file(
             config.google_client_secret_path,
             oidc_state.clone(),
@@ -225,14 +231,17 @@ async fn main() -> anyhow::Result<()> {
             success: "Success".into(),
         }),
         oidc_state,
-        login_tokens: LoginTokenGranter::new(Duration::from_secs(config.token_duration as u64))
+        login_tokens: LoginTokenGranter::new(Duration::from_secs(config.token_duration as u64)),
+        leaderboard: Leaderboard::new(db.clone(), node.clone(), 5).await?,
+        node,
+        db,
     };
 
     let config = BaseConfig {
         api_token: HeaderValue::from_str(&config.api_token).context("parsing api_token")?,
-        bind_address: format!("{}:{}", config.server_address, config.server_port)
-            .parse()
-            .map(BindAddress::Network)
+        bind_address: (config.server_address, config.server_port)
+            .to_socket_addrs()
+            .map(|mut x| BindAddress::Network(x.next().expect("At least 1 socket addr")))
             .context("parsing server_address and server_port")?,
         stderr_log_path: config.stderr_log,
         routing_log_path: config.routing_log,

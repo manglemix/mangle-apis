@@ -1,3 +1,5 @@
+use std::{collections::HashMap, net::SocketAddr};
+
 use mangle_api_core::serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -17,6 +19,10 @@ pub struct Config {
     pub cors_allowed_methods: Vec<String>,
     #[serde(default = "Default::default")]
     pub cors_allowed_origins: Vec<String>,
+    // #[serde(default = "suspicious_security_log")]
+    // pub login_tokens_path: String,
+    #[serde(default = "network_port")]
+    pub network_port: u16,
 
     pub google_client_secret_path: String,
     #[serde(default = "bola_profiles_table")]
@@ -26,6 +32,8 @@ pub struct Config {
     pub api_token: String,
     #[serde(default = "token_duration")]
     pub token_duration: u64,
+    #[serde(default = "Default::default")]
+    pub sibling_domains: HashMap<String, SocketAddr>
 }
 
 // impl BaseConfig for Config {
@@ -104,4 +112,9 @@ fn bola_profiles_table() -> String {
 fn token_duration() -> u64 {
     // 30 days
     60 * 60 * 24 * 30
+}
+
+
+fn network_port() -> u16 {
+    10419
 }

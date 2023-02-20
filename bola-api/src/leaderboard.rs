@@ -1,33 +1,17 @@
-use std::{sync::Arc, mem::transmute, ops::Deref};
+use std::{sync::Arc};
 
 use aws_sdk_dynamodb::model::{AttributeValue, AttributeValueUpdate, AttributeAction};
-use mangle_api_core::{parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard}, tokio::sync::broadcast::{Sender}, log::error};
+use mangle_api_core::{parking_lot::{RwLock}, tokio::sync::{broadcast::{Sender, channel}}, log::error, distributed::Node, anyhow};
 
-use crate::db::DB;
+use crate::{db::DB, network::NetworkMessage};
 
 
+const LEADERBOARD_UPDATE_BUFFER_SIZE: usize = 8;
+
+
+#[derive(Clone)]
 pub struct LeaderboardUpdate {
-    reader: RwLockReadGuard<'static, Vec<LeaderboardEntry>>,
-    _inner: Arc<LeaderboardImpl>
-}
-
-
-impl Deref for LeaderboardUpdate {
-    type Target = Vec<LeaderboardEntry>;
-
-    fn deref(&self) -> &Self::Target {
-        self.reader.deref()
-    }
-}
-
-
-impl Clone for LeaderboardUpdate {
-    fn clone(&self) -> Self {
-        Self {
-            reader: RwLockReadGuard::rwlock(&self.reader).read(),
-            _inner: self._inner.clone()
-        }
-    }
+    pub leaderboard: Vec<LeaderboardEntry>
 }
 
 
@@ -46,7 +30,8 @@ struct LeaderboardImpl {
     easy_leaderboard_updater: Sender<LeaderboardUpdate>,
     normal_leaderboard_updater: Sender<LeaderboardUpdate>,
     expert_leaderboard_updater: Sender<LeaderboardUpdate>,
-    db: DB
+    db: DB,
+    node: Node<NetworkMessage>
 }
 
 
@@ -63,6 +48,22 @@ pub struct Leaderboard {
 
 
 impl Leaderboard {
+    pub async fn new(db: DB, node: Node<NetworkMessage>, leaderboard_span: usize) -> Result<Self, anyhow::Error> {
+        Ok(Self {
+            inner: Arc::new(LeaderboardImpl {
+                easy_leaderboard: Default::default(),
+                normal_leaderboard: Default::default(),
+                expert_leaderboard: Default::default(),
+                leaderboard_span,
+                easy_leaderboard_updater: channel(LEADERBOARD_UPDATE_BUFFER_SIZE).0,
+                normal_leaderboard_updater: channel(LEADERBOARD_UPDATE_BUFFER_SIZE).0,
+                expert_leaderboard_updater: channel(LEADERBOARD_UPDATE_BUFFER_SIZE).0,
+                db,
+                node
+            })
+        })
+    }
+
     async fn add_leaderboard_entry(
         &self,
         leaderboard: &RwLock<Vec<LeaderboardEntry>>,
@@ -70,6 +71,8 @@ impl Leaderboard {
         entry: LeaderboardEntry,
         leaderboard_difficulty: &str
     ) -> Result<(), AddLeaderboardEntryError> {
+        assert!(matches!(leaderboard_difficulty, "easy" | "normal" | "expert"));
+
         let mut leaderboard_writer = leaderboard.write();
 
         let Err(idx) = leaderboard_writer.binary_search(&entry) else {
@@ -83,9 +86,7 @@ impl Leaderboard {
         }
 
         let _ = updater.send(LeaderboardUpdate {
-            // SAFETY: The struct holds a strong reference to LeaderboardImpl and thus the original RwLock
-            reader: unsafe { transmute(RwLockWriteGuard::downgrade(leaderboard_writer))},
-            _inner: self.inner.clone()
+            leaderboard: leaderboard_writer.clone()
         });
 
         let email = match self.inner.db.get_email_from_username(&entry.username).await {
@@ -116,6 +117,13 @@ impl Leaderboard {
         {
             error!(target: "leaderboard", "Error updating item for {}: {e:?}", entry.username);
             return Err(AddLeaderboardEntryError::InternalError)
+        }
+
+        for (domain, err) in self.inner.node.broadcast_message(&NetworkMessage::HighscoreUpdate {
+            difficulty: leaderboard_difficulty.into(),
+            score: entry.score
+        }).await {
+            error!(target: "leaderboard", "Error broadcasting message to {}: {:?}", domain, err);
         }
 
         Ok(())
