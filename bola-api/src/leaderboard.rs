@@ -1,0 +1,174 @@
+use std::{sync::Arc, mem::transmute, ops::Deref};
+
+use aws_sdk_dynamodb::model::{AttributeValue, AttributeValueUpdate, AttributeAction};
+use mangle_api_core::{parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard}, tokio::sync::broadcast::{Sender}, log::error};
+
+use crate::db::DB;
+
+
+pub struct LeaderboardUpdate {
+    reader: RwLockReadGuard<'static, Vec<LeaderboardEntry>>,
+    _inner: Arc<LeaderboardImpl>
+}
+
+
+impl Deref for LeaderboardUpdate {
+    type Target = Vec<LeaderboardEntry>;
+
+    fn deref(&self) -> &Self::Target {
+        self.reader.deref()
+    }
+}
+
+
+impl Clone for LeaderboardUpdate {
+    fn clone(&self) -> Self {
+        Self {
+            reader: RwLockReadGuard::rwlock(&self.reader).read(),
+            _inner: self._inner.clone()
+        }
+    }
+}
+
+
+#[derive(PartialOrd, PartialEq, Ord, Eq, Clone)]
+pub struct LeaderboardEntry {
+    score: u16,
+    username: String
+}
+
+
+struct LeaderboardImpl {
+    easy_leaderboard: RwLock<Vec<LeaderboardEntry>>,
+    normal_leaderboard: RwLock<Vec<LeaderboardEntry>>,
+    expert_leaderboard: RwLock<Vec<LeaderboardEntry>>,
+    leaderboard_span: usize,
+    easy_leaderboard_updater: Sender<LeaderboardUpdate>,
+    normal_leaderboard_updater: Sender<LeaderboardUpdate>,
+    expert_leaderboard_updater: Sender<LeaderboardUpdate>,
+    db: DB
+}
+
+
+pub enum AddLeaderboardEntryError {
+    NotAUser,
+    InternalError
+}
+
+
+#[derive(Clone)]
+pub struct Leaderboard {
+    inner: Arc<LeaderboardImpl>
+}
+
+
+impl Leaderboard {
+    async fn add_leaderboard_entry(
+        &self,
+        leaderboard: &RwLock<Vec<LeaderboardEntry>>,
+        updater: &Sender<LeaderboardUpdate>,
+        entry: LeaderboardEntry,
+        leaderboard_difficulty: &str
+    ) -> Result<(), AddLeaderboardEntryError> {
+        let mut leaderboard_writer = leaderboard.write();
+
+        let Err(idx) = leaderboard_writer.binary_search(&entry) else {
+            return Ok(())
+        };
+
+        leaderboard_writer.insert(idx, entry.clone());
+
+        if leaderboard_writer.len() > self.inner.leaderboard_span {
+            leaderboard_writer.pop();
+        }
+
+        let _ = updater.send(LeaderboardUpdate {
+            // SAFETY: The struct holds a strong reference to LeaderboardImpl and thus the original RwLock
+            reader: unsafe { transmute(RwLockWriteGuard::downgrade(leaderboard_writer))},
+            _inner: self.inner.clone()
+        });
+
+        let email = match self.inner.db.get_email_from_username(&entry.username).await {
+            Ok(Some(x)) => x,
+            Ok(None) => return Err(AddLeaderboardEntryError::NotAUser),
+            Err(e) => {
+                error!(target: "leaderboard", "Error getting email for {}: {e:?}", entry.username);
+                return Err(AddLeaderboardEntryError::InternalError)
+            }
+        };
+
+        if let Err(e) = self
+            .inner
+            .db
+            .client
+            .update_item()
+            .table_name(self.inner.db.bola_profiles_table.clone())
+            .key("email", AttributeValue::S(email))
+            .attribute_updates(
+                format!("{leaderboard_difficulty}_highscore"),
+                AttributeValueUpdate::builder()
+                    .action(AttributeAction::Put)
+                    .value(AttributeValue::N(entry.score.to_string()))
+                    .build()
+            )
+            .send()
+            .await
+        {
+            error!(target: "leaderboard", "Error updating item for {}: {e:?}", entry.username);
+            return Err(AddLeaderboardEntryError::InternalError)
+        }
+
+        Ok(())
+    }
+    pub async fn add_easy_entry(&self, entry: LeaderboardEntry) -> Result<(), AddLeaderboardEntryError> {
+        self.add_leaderboard_entry(
+            &self.inner.easy_leaderboard,
+            &self.inner.easy_leaderboard_updater,
+            entry,
+            "easy"
+        ).await
+    }
+    pub async fn add_normal_entry(&self, entry: LeaderboardEntry) -> Result<(), AddLeaderboardEntryError> {
+        self.add_leaderboard_entry(
+            &self.inner.normal_leaderboard,
+            &self.inner.normal_leaderboard_updater,
+            entry,
+            "normal"
+        ).await
+    }
+    pub async fn add_expert_entry(&self, entry: LeaderboardEntry) -> Result<(), AddLeaderboardEntryError> {
+        self.add_leaderboard_entry(
+            &self.inner.expert_leaderboard,
+            &self.inner.expert_leaderboard_updater,
+            entry,
+            "expert"
+        ).await
+    }
+    pub async fn wait_for_easy_update(&self) -> Option<LeaderboardUpdate> {
+        self
+            .inner
+            .easy_leaderboard_updater
+            .subscribe()
+            .recv()
+            .await
+            .ok()
+    }
+    pub async fn wait_for_normal_update(&self) -> Option<LeaderboardUpdate> {
+        self
+            .inner
+            .normal_leaderboard_updater
+            .subscribe()
+            .recv()
+            .await
+            .ok()
+    }
+    pub async fn wait_for_expert_update(&self) -> Option<LeaderboardUpdate> {
+        self
+            .inner
+            .expert_leaderboard_updater
+            .subscribe()
+            .recv()
+            .await
+            .ok()
+    }
+}

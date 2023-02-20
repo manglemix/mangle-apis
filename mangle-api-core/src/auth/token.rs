@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap, sync::Arc, time::Duration,
+    sync::Arc, time::Duration, hash::Hash
 };
 
 use axum::{
@@ -7,6 +7,7 @@ use axum::{
     extract::{FromRef, FromRequestParts},
     http::{request::Parts, HeaderValue, StatusCode},
 };
+use bimap::BiMap;
 use parking_lot::Mutex;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use tokio::{
@@ -37,19 +38,42 @@ use tokio::{
 // }
 
 
-struct TokenGranterImpl<T: Send + Sync + 'static> {
+struct TokenData<T> {
+    _sender: Sender<()>,
+    data: Arc<T>
+}
+
+
+impl<T: Hash> Hash for TokenData<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.data.hash(state);
+    }
+}
+
+
+impl<T: PartialEq> PartialEq for TokenData<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
+}
+
+
+impl<T: Eq> Eq for TokenData<T> { }
+
+
+struct TokenGranterImpl<T: Send + Sync + Hash + Eq + 'static> {
     // When the sender gets dropped, the task responsible for expiring the token will complete
-    tokens: Mutex<HashMap<HeaderValue, (Sender<()>, Arc<T>)>>,
+    tokens: Mutex<BiMap<HeaderValue, TokenData<T>>>,
     token_duration: Duration,
 }
 
 
 #[derive(Clone)]
-pub struct BasicTokenGranter<T: Send + Sync + 'static> {
+pub struct BasicTokenGranter<T: Send + Sync + Hash + Eq + 'static> {
     inner: Arc<TokenGranterImpl<T>>
 }
 
-impl<T: Send + Sync + 'static> BasicTokenGranter<T> {
+impl<T: Send + Sync + Hash + Eq + 'static> BasicTokenGranter<T> {
     pub fn new(token_duration: Duration) -> Self {
         Self {
             inner: Arc::new(TokenGranterImpl {
@@ -60,6 +84,14 @@ impl<T: Send + Sync + 'static> BasicTokenGranter<T> {
     }
 
     pub fn create_token<const N: u8>(&self, item: T) -> HeaderValue {
+        let mut lock = self.inner.tokens.lock();
+        let (sender, receiver) = channel();
+        let token_data = TokenData{
+            _sender: sender,
+            data: Arc::new(item)
+        };
+        lock.remove_by_right(&token_data);
+
         let bytes: Vec<u8> = thread_rng()
             .sample_iter(&Alphanumeric)
             .take(N as usize)
@@ -67,12 +99,7 @@ impl<T: Send + Sync + 'static> BasicTokenGranter<T> {
 
         let token = unsafe { HeaderValue::from_maybe_shared_unchecked(bytes) };
 
-        let (sender, receiver) = channel();
-
-        self.inner
-            .tokens
-            .lock()
-            .insert(token.clone(), (sender, Arc::new(item)));
+        lock.insert(token.clone(), token_data);
 
         let token2 = token.clone();
         let token_duration = self.inner.token_duration;
@@ -81,7 +108,7 @@ impl<T: Send + Sync + 'static> BasicTokenGranter<T> {
         spawn(async move {
             tokio::select! {
                 () = sleep(token_duration) => {
-                    inner.tokens.lock().remove(&token2);
+                    inner.tokens.lock().remove_by_left(&token2);
                 }
                 _ = receiver => { }
             }
@@ -91,7 +118,14 @@ impl<T: Send + Sync + 'static> BasicTokenGranter<T> {
     }
 
     pub fn revoke_token(&self, token: &HeaderValue) -> Option<Arc<T>> {
-        self.inner.tokens.lock().remove(token).unzip().1
+        self
+            .inner
+            .tokens
+            .lock()
+            .remove_by_left(token)
+            .unzip()
+            .1
+            .map(|x| x.data)
     }
 
     pub fn verify_token(&self, token: &HeaderValue) -> Option<Arc<T>> {
@@ -99,8 +133,8 @@ impl<T: Send + Sync + 'static> BasicTokenGranter<T> {
             .inner
             .tokens
             .lock()
-            .get(token)
-            .map(|x| x.1.clone())
+            .get_by_left(token)
+            .map(|x| x.data.clone())
     }
 }
 

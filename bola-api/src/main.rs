@@ -1,7 +1,7 @@
 use std::{ops::Deref, time::Duration};
 
 // use aws_config::{SdkConfig};
-use db::{DB, GetUserProfileError, UserProfile};
+use db::{DB, UserProfile};
 use mangle_api_core::{
     anyhow::{self, Context},
     auth::{
@@ -26,11 +26,10 @@ use mangle_api_core::{
 
 mod config;
 mod db;
+mod leaderboard;
 
 use config::Config;
 use rustrict::CensorStr;
-
-use crate::db::GetItemError;
 
 
 create_header_token_granter!( LoginTokenGranter "LoginToken" 32 String);
@@ -100,14 +99,14 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
         };
 
         match db.get_user_profile_by_email(&email).await {
-            Ok(ref x) => {
+            Ok(Some(ref x)) => {
                 let Some(ws_tmp) = ws.send(serde_json::to_string(x).unwrap()) else { return };
                 let Some(ws_tmp) = ws_tmp.send(
                     token_granter.create_token(email).to_str().unwrap()
                 ) else { return };
                 ws = ws_tmp;
             }
-            Err(GetUserProfileError::GetItemError(GetItemError::ItemNotFound)) => {
+            Ok(None) => {
                 let Some(ws_tmp) = ws.send("Sign Up") else { return };
                 ws = ws_tmp;
                 let mut profile;
@@ -179,16 +178,13 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
 
 async fn quick_login(token: VerifiedToken<LoginTokenGranter>, State(db): State<DB>) -> (StatusCode, String) {
     match db.get_user_profile_by_email(token.item.deref().clone()).await {
-        Ok(ref x) => (StatusCode::OK, serde_json::to_string(x).expect("Correct serialization of UserProfile")),
-        Err(e) => match e {
-            GetUserProfileError::GetItemError(e) => match e {
-                GetItemError::AWSError(_) => (StatusCode::INTERNAL_SERVER_ERROR, String::new()),
-                GetItemError::ItemNotFound => {
-                    token.revoke_token();
-                    (StatusCode::BAD_REQUEST, "User does not exist".into())
-                }
-                GetItemError::DeserializeError { field: _ } => (StatusCode::INTERNAL_SERVER_ERROR, String::new()),
-            }
+        Ok(Some(ref x)) => (StatusCode::OK, serde_json::to_string(x).expect("Correct serialization of UserProfile")),
+        Ok(None) => {
+            (StatusCode::BAD_REQUEST, "User does not exist".into())
+        }
+        Err(e) => {
+            error!(target: "quick_login", "{e:?}");
+            (StatusCode::INTERNAL_SERVER_ERROR, String::new())
         }
     }
 }

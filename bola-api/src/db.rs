@@ -1,10 +1,8 @@
-use std::collections::HashMap;
+use std::{collections::HashMap};
 
-use aws_sdk_dynamodb::{model::AttributeValue, Client, error::{GetItemErrorKind, PutItemErrorKind}};
+use aws_sdk_dynamodb::{model::AttributeValue, Client, error::{GetItemErrorKind}};
 use aws_types::SdkConfig;
-use mangle_api_core::{derive_more::Display, serde::{Deserialize, self, Serialize}};
-use thiserror::Error;
-// use mangle_api_core::regex::Regex;
+use mangle_api_core::{serde::{Deserialize, self, Serialize}, anyhow::{Error, anyhow}};
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
 #[serde(crate = "serde")]
@@ -20,41 +18,11 @@ pub struct UserProfile {
     pub tournament_wins: Vec<u16>,
 }
 
-#[derive(Error, Debug, Display)]
-pub enum CheckUsernameError {
-    AWSError(#[from] aws_sdk_dynamodb::error::QueryError),
-}
-
-#[derive(Error, Debug, Display)]
-pub enum GetItemError {
-    AWSError(#[from] aws_sdk_dynamodb::error::GetItemError),
-    ItemNotFound,
-    DeserializeError { field: &'static str },
-}
-
-#[derive(Error, Debug, Display)]
-pub enum PutItemError {
-    AWSError(#[from] aws_sdk_dynamodb::error::PutItemError),
-}
-
-#[derive(Error, Debug, Display)]
-pub enum GetUserProfileError {
-    GetItemError(#[from] GetItemError),
-    // NotAnEmail
-}
-
-#[derive(Error, Debug, Display)]
-pub enum CreateUserProfileError {
-    PutItemError(#[from] PutItemError),
-    // NotAnEmail
-}
-
 
 #[derive(Clone)]
 pub struct DB {
-    client: Client,
-    bola_profiles_table: String,
-    // regex: Regex
+    pub client: Client,
+    pub bola_profiles_table: String,
 }
 
 impl DB {
@@ -62,12 +30,42 @@ impl DB {
         Self {
             client: Client::new(config),
             bola_profiles_table,
-            // regex: Regex::new(r"^.*@gmail.com$").expect("regex to be correct")
         }
     }
 
-    pub async fn is_username_taken(&self, username: impl Into<String>) -> Result<bool, CheckUsernameError> {
-        match self
+    pub async fn get_email_from_username(&self, username: impl Into<String>) -> Result<Option<String>, Error> {
+        let username = username.into();
+
+        let query = self
+            .client
+            .query()
+            .table_name(self.bola_profiles_table.clone())
+            .index_name("username-index")
+            .key_condition_expression("username = :check_username")
+            .expression_attribute_values(":check_username", AttributeValue::S(username.clone()))
+            .projection_expression("email")
+            .send()
+            .await
+            .map_err(Error::from)?;
+
+        let Some(item) = query.items()
+            .ok_or_else(|| anyhow!("query had no items field"))?
+            .first() else
+            {
+                return Ok(None)
+            };
+            
+        Ok(Some(
+            item.get("email")
+                .ok_or_else(|| anyhow!("user: {username} had no email!"))?
+                .as_s()
+                .map_err(|_| anyhow!("user: {username} had non-string email"))?
+                .clone()
+        ))
+    }
+
+    pub async fn is_username_taken(&self, username: impl Into<String>) -> Result<bool, Error> {
+        self
             .client
             .query()
             .table_name(self.bola_profiles_table.clone())
@@ -76,11 +74,8 @@ impl DB {
             .expression_attribute_values(":check_username", AttributeValue::S(username.into()))
             .send()
             .await
-            .map_err(|e| e.into_service_error())
-        {
-            Ok(x) => Ok(x.count() > 0),
-            Err(e) => Err(CheckUsernameError::AWSError(e).into())
-        }
+            .map(|x| x.count() > 0)
+            .map_err(Into::into)
     }
 
     // pub async fn get_user_profile_by_username(
@@ -127,11 +122,8 @@ impl DB {
     pub async fn get_user_profile_by_email(
         &self,
         email: impl Into<String>,
-    ) -> Result<UserProfile, GetUserProfileError> {
+    ) -> Result<Option<UserProfile>, Error> {
         let email = email.into();
-        // if !self.regex.is_match(&email) {
-        //     return Err(GetUserProfileError::NotAnEmail)
-        // }
 
         let item = match self
             .client
@@ -143,28 +135,35 @@ impl DB {
             .map_err(|e| e.into_service_error())
         {
             Ok(x) => Ok(x),
-            Err(e) => Err(match &e.kind {
-                GetItemErrorKind::ResourceNotFoundException(_) => GetItemError::ItemNotFound,
-                _ => GetItemError::AWSError(e)
-            })
+            Err(e) => match &e.kind {
+                GetItemErrorKind::ResourceNotFoundException(_) => return Ok(None),
+                _ => Err(e)
+            }
         }?;
 
-        Self::map_to_user_profile(
-            item.item().ok_or(GetItemError::ItemNotFound)?
-        )
+        let Some(item) = item.item() else {
+            return Ok(None)
+        };
+
+        Some(Self::map_to_user_profile(item)).transpose()
     }
 
-    fn map_to_user_profile(map: &HashMap<String, AttributeValue>) -> Result<UserProfile, GetUserProfileError> {
+    fn map_to_user_profile(map: &HashMap<String, AttributeValue>) -> Result<UserProfile, Error> {
+        macro_rules! err {
+            ($field_name: literal) => {
+                anyhow!("Could not deserialize field: {} in user profile", $field_name)
+            };
+        }
         macro_rules! deser {
             ($field: literal, $op: ident) => {
                 map.get($field)
                     .map(|x| x.$op())
                     .transpose()
-                    .map_err(|_| GetItemError::DeserializeError { field: $field })?
+                    .map_err(|_| err!($field))?
             };
             (num $field: literal) => {
                 deser!($field, as_n)
-                    .map(|x| x.parse().map_err(|_| GetItemError::DeserializeError { field: $field }))
+                    .map(|x| x.parse().map_err(|_| err!($field)))
                     .transpose()
             };
         }
@@ -180,7 +179,7 @@ impl DB {
                         for num in nums {
                             out.push(
                                 num.parse()
-                                    .map_err(|_| GetItemError::DeserializeError { field: "tournament_wins" })?
+                                    .map_err(|_| err!("tournament_wins"))?
                             );
                         }
                         out
@@ -189,7 +188,7 @@ impl DB {
                 }
             },
             username: deser!("username", as_s)
-                .ok_or(GetItemError::DeserializeError { field: "username" })?
+                .ok_or_else(|| anyhow!("Missing username in user profile"))?
                 .clone()
         })
     }
@@ -198,11 +197,8 @@ impl DB {
         &self,
         email: impl Into<String>,
         profile: UserProfile
-    ) -> Result<(), CreateUserProfileError> {
+    ) -> Result<(), Error> {
         let email = email.into();
-        // if !self.regex.is_match(&email) {
-        //     return Err(CreateUserProfileError::NotAnEmail)
-        // }
 
         let mut request = self
             .client
@@ -225,15 +221,9 @@ impl DB {
         match request
             .send()
             .await
-            .map_err(|e| e.into_service_error())
         {
-            Ok(_) => {}
-            Err(e) => Err(match &e.kind {
-                PutItemErrorKind::ResourceNotFoundException(_) => todo!(),
-                _ => PutItemError::AWSError(e)
-            })?
-        };
-
-        Ok(())
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.into())
+        }
     }
 }
