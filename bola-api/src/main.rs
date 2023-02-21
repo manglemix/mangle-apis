@@ -1,7 +1,7 @@
-use std::{ops::Deref, time::Duration, net::ToSocketAddrs};
+use std::{net::ToSocketAddrs, ops::Deref, time::Duration};
 
 // use aws_config::{SdkConfig};
-use db::{DB, UserProfile};
+use db::{UserProfile, DB};
 use leaderboard::Leaderboard;
 use mangle_api_core::{
     anyhow::{self, Context},
@@ -10,7 +10,8 @@ use mangle_api_core::{
         openid::{
             google::{new_google_oidc_from_file, GoogleOIDC},
             OIDCState,
-        }, token::{VerifiedToken, HeaderTokenGranter},
+        },
+        token::{HeaderTokenGranter, VerifiedToken},
     },
     axum::{
         extract::{ws::Message, FromRef, State, WebSocketUpgrade},
@@ -18,10 +19,14 @@ use mangle_api_core::{
         response::Response,
         routing::get,
     },
-    get_pipe_name, make_app, openid_redirect, pre_matches, start_api,
+    create_header_token_granter,
+    distributed::Node,
+    get_pipe_name,
+    log::error,
+    make_app, openid_redirect, pre_matches, serde_json, start_api,
     tokio::{self, select},
     ws::{ManagedWebSocket, WebSocketCode},
-    BaseConfig, BindAddress, serde_json, log::error, create_header_token_granter, distributed::Node,
+    BaseConfig, BindAddress,
 };
 
 mod config;
@@ -33,9 +38,7 @@ use config::Config;
 use network::NetworkMessage;
 use rustrict::CensorStr;
 
-
 create_header_token_granter!( LoginTokenGranter "LoginToken" 32 String);
-
 
 #[derive(Clone)]
 struct GlobalState {
@@ -45,9 +48,8 @@ struct GlobalState {
     auth_pages: AuthPages,
     login_tokens: LoginTokenGranter,
     node: Node<NetworkMessage>,
-    leaderboard: Leaderboard
+    leaderboard: Leaderboard,
 }
-
 
 impl FromRef<GlobalState> for LoginTokenGranter {
     fn from_ref(input: &GlobalState) -> Self {
@@ -73,15 +75,18 @@ impl FromRef<GlobalState> for AuthPages {
     }
 }
 
-
 impl FromRef<GlobalState> for OIDCState {
     fn from_ref(input: &GlobalState) -> Self {
         input.oidc_state.clone()
     }
 }
 
-
-async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>, State(token_granter): State<LoginTokenGranter>, ws: WebSocketUpgrade) -> Response {
+async fn login(
+    State(GoogleOIDC(oidc)): State<GoogleOIDC>,
+    State(db): State<DB>,
+    State(token_granter): State<LoginTokenGranter>,
+    ws: WebSocketUpgrade,
+) -> Response {
     ws.on_upgrade(|ws| async move {
         let (auth_url, fut) = oidc.initiate_auth(["openid", "email"]);
         let ws = ManagedWebSocket::new(ws, Duration::from_secs(45));
@@ -137,7 +142,7 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
                             return
                         };
                         ws = ws_tmp;
-                        continue
+                        continue;
                     }
 
                     match db.is_username_taken(&profile.username).await {
@@ -146,23 +151,23 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
                                 return
                             };
                             ws = ws_tmp;
-                            continue
+                            continue;
                         }
                         Ok(false) => {}
                         Err(e) => {
                             error!(target: "login", "{e:?}");
                             ws.close_frame(WebSocketCode::InternalError, "");
-                            return
+                            return;
                         }
                     };
 
-                    break
+                    break;
                 }
 
                 if let Err(e) = db.create_user_profile(email.clone(), profile).await {
                     error!(target: "login", "{e:?}");
                     ws.close_frame(WebSocketCode::InternalError, "");
-                    return
+                    return;
                 }
 
                 let Some(ws_tmp) = ws.send(
@@ -173,7 +178,7 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
             Err(e) => {
                 error!(target: "login", "{e:?}");
                 ws.close_frame(WebSocketCode::InternalError, "");
-                return
+                return;
             }
         };
 
@@ -181,20 +186,25 @@ async fn login(State(GoogleOIDC(oidc)): State<GoogleOIDC>, State(db): State<DB>,
     })
 }
 
-
-async fn quick_login(token: VerifiedToken<LoginTokenGranter>, State(db): State<DB>) -> (StatusCode, String) {
-    match db.get_user_profile_by_email(token.item.deref().clone()).await {
-        Ok(Some(ref x)) => (StatusCode::OK, serde_json::to_string(x).expect("Correct serialization of UserProfile")),
-        Ok(None) => {
-            (StatusCode::BAD_REQUEST, "User does not exist".into())
-        }
+async fn quick_login(
+    token: VerifiedToken<LoginTokenGranter>,
+    State(db): State<DB>,
+) -> (StatusCode, String) {
+    match db
+        .get_user_profile_by_email(token.item.deref().clone())
+        .await
+    {
+        Ok(Some(ref x)) => (
+            StatusCode::OK,
+            serde_json::to_string(x).expect("Correct serialization of UserProfile"),
+        ),
+        Ok(None) => (StatusCode::BAD_REQUEST, "User does not exist".into()),
         Err(e) => {
             error!(target: "quick_login", "{e:?}");
             (StatusCode::INTERNAL_SERVER_ERROR, String::new())
         }
     }
 }
-
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -213,7 +223,7 @@ async fn main() -> anyhow::Result<()> {
 
     let oidc_state = OIDCState::default();
 
-    let node = Node::new(config.sibling_domains.into_iter().collect(), config.network_port).await?;
+    let node = Node::new(config.sibling_domains, config.network_port).await?;
     let db = DB::new(&aws_config, config.bola_profiles_table);
 
     let state = GlobalState {
@@ -273,9 +283,7 @@ async fn main() -> anyhow::Result<()> {
         app,
         pipe_name,
         config,
-        [
-            "^/oidc/"
-        ],
+        ["^/oidc/"],
         [
             ("/oidc/redirect", openid_redirect!()),
             // ("/sign_up", post(sign_up)),

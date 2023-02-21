@@ -1,3 +1,5 @@
+#![feature(string_leak)]
+
 use axum::http::HeaderValue;
 use axum::routing::MethodRouter;
 use axum::{Router, Server};
@@ -39,14 +41,14 @@ use auth::bearer::BearerAuth;
 
 pub use anyhow;
 pub use axum;
+pub use bimap;
 pub use derive_more;
 pub use log;
 pub use parking_lot;
 #[cfg(any(feature = "redis"))]
 pub use redis;
-pub use serde;
-pub use bimap;
 pub use regex;
+pub use serde;
 pub use serde_json;
 pub use tokio;
 pub use toml;

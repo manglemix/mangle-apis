@@ -56,14 +56,14 @@ where
             };
         }
         if self.public_paths.is_match(request.uri().path()) {
-            return Ok(())
+            return Ok(());
         }
 
         match request.headers().get("Authorization") {
             Some(header) => {
                 let header = match header.to_str() {
                     Ok(x) => x,
-                    Err(_) => unauthorized!()
+                    Err(_) => unauthorized!(),
                 };
 
                 if !header.starts_with("Bearer ") {
@@ -80,13 +80,11 @@ where
             }
             None => {
                 if let Some(query) = request.uri().query() {
-                    if query.contains(
-                        &format!(
-                            "api_token={}",
-                            self.api_token.to_str().expect("API Token to be utf-8")
-                        )
-                    ) {
-                        return Ok(())
+                    if query.contains(&format!(
+                        "api_token={}",
+                        self.api_token.to_str().expect("API Token to be utf-8")
+                    )) {
+                        return Ok(());
                     }
                 }
                 unauthorized!()

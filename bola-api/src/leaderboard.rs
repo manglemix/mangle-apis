@@ -1,26 +1,31 @@
-use std::{sync::Arc};
+use std::sync::Arc;
 
-use aws_sdk_dynamodb::model::{AttributeValue, AttributeValueUpdate, AttributeAction};
-use mangle_api_core::{parking_lot::{RwLock}, tokio::sync::{broadcast::{Sender, channel}}, log::error, distributed::Node, anyhow};
+use aws_sdk_dynamodb::model::{AttributeAction, AttributeValue, AttributeValueUpdate};
+use mangle_api_core::{
+    anyhow,
+    distributed::Node,
+    log::error,
+    parking_lot::RwLock,
+    tokio::sync::broadcast::{channel, Sender},
+};
 
-use crate::{db::DB, network::NetworkMessage};
-
+use crate::{
+    db::DB,
+    network::{HighscoreUpdate, NetworkMessage},
+};
 
 const LEADERBOARD_UPDATE_BUFFER_SIZE: usize = 8;
 
-
 #[derive(Clone)]
 pub struct LeaderboardUpdate {
-    pub leaderboard: Vec<LeaderboardEntry>
+    pub leaderboard: Arc<Vec<LeaderboardEntry>>,
 }
-
 
 #[derive(PartialOrd, PartialEq, Ord, Eq, Clone)]
 pub struct LeaderboardEntry {
     score: u16,
-    username: String
+    username: String,
 }
-
 
 struct LeaderboardImpl {
     easy_leaderboard: RwLock<Vec<LeaderboardEntry>>,
@@ -31,24 +36,25 @@ struct LeaderboardImpl {
     normal_leaderboard_updater: Sender<LeaderboardUpdate>,
     expert_leaderboard_updater: Sender<LeaderboardUpdate>,
     db: DB,
-    node: Node<NetworkMessage>
+    node: Node<NetworkMessage>,
 }
-
 
 pub enum AddLeaderboardEntryError {
     NotAUser,
-    InternalError
+    InternalError,
 }
-
 
 #[derive(Clone)]
 pub struct Leaderboard {
-    inner: Arc<LeaderboardImpl>
+    inner: Arc<LeaderboardImpl>,
 }
 
-
 impl Leaderboard {
-    pub async fn new(db: DB, node: Node<NetworkMessage>, leaderboard_span: usize) -> Result<Self, anyhow::Error> {
+    pub async fn new(
+        db: DB,
+        node: Node<NetworkMessage>,
+        leaderboard_span: usize,
+    ) -> Result<Self, anyhow::Error> {
         Ok(Self {
             inner: Arc::new(LeaderboardImpl {
                 easy_leaderboard: Default::default(),
@@ -59,8 +65,8 @@ impl Leaderboard {
                 normal_leaderboard_updater: channel(LEADERBOARD_UPDATE_BUFFER_SIZE).0,
                 expert_leaderboard_updater: channel(LEADERBOARD_UPDATE_BUFFER_SIZE).0,
                 db,
-                node
-            })
+                node,
+            }),
         })
     }
 
@@ -69,9 +75,12 @@ impl Leaderboard {
         leaderboard: &RwLock<Vec<LeaderboardEntry>>,
         updater: &Sender<LeaderboardUpdate>,
         entry: LeaderboardEntry,
-        leaderboard_difficulty: &str
+        leaderboard_difficulty: &str,
     ) -> Result<(), AddLeaderboardEntryError> {
-        assert!(matches!(leaderboard_difficulty, "easy" | "normal" | "expert"));
+        assert!(matches!(
+            leaderboard_difficulty,
+            "easy" | "normal" | "expert"
+        ));
 
         let mut leaderboard_writer = leaderboard.write();
 
@@ -86,7 +95,7 @@ impl Leaderboard {
         }
 
         let _ = updater.send(LeaderboardUpdate {
-            leaderboard: leaderboard_writer.clone()
+            leaderboard: Arc::new(leaderboard_writer.clone()),
         });
 
         let email = match self.inner.db.get_email_from_username(&entry.username).await {
@@ -94,7 +103,7 @@ impl Leaderboard {
             Ok(None) => return Err(AddLeaderboardEntryError::NotAUser),
             Err(e) => {
                 error!(target: "leaderboard", "Error getting email for {}: {e:?}", entry.username);
-                return Err(AddLeaderboardEntryError::InternalError)
+                return Err(AddLeaderboardEntryError::InternalError);
             }
         };
 
@@ -110,51 +119,68 @@ impl Leaderboard {
                 AttributeValueUpdate::builder()
                     .action(AttributeAction::Put)
                     .value(AttributeValue::N(entry.score.to_string()))
-                    .build()
+                    .build(),
             )
             .send()
             .await
         {
             error!(target: "leaderboard", "Error updating item for {}: {e:?}", entry.username);
-            return Err(AddLeaderboardEntryError::InternalError)
+            return Err(AddLeaderboardEntryError::InternalError);
         }
 
-        for (domain, err) in self.inner.node.broadcast_message(&NetworkMessage::HighscoreUpdate {
-            difficulty: leaderboard_difficulty.into(),
-            score: entry.score
-        }).await {
+        for (domain, err) in self
+            .inner
+            .node
+            .broadcast_message(&NetworkMessage::HighscoreUpdate(HighscoreUpdate {
+                username: entry.username,
+                difficulty: leaderboard_difficulty.into(),
+                score: entry.score,
+            }))
+            .await
+        {
             error!(target: "leaderboard", "Error broadcasting message to {}: {:?}", domain, err);
         }
 
         Ok(())
     }
-    pub async fn add_easy_entry(&self, entry: LeaderboardEntry) -> Result<(), AddLeaderboardEntryError> {
+    pub async fn add_easy_entry(
+        &self,
+        entry: LeaderboardEntry,
+    ) -> Result<(), AddLeaderboardEntryError> {
         self.add_leaderboard_entry(
             &self.inner.easy_leaderboard,
             &self.inner.easy_leaderboard_updater,
             entry,
-            "easy"
-        ).await
+            "easy",
+        )
+        .await
     }
-    pub async fn add_normal_entry(&self, entry: LeaderboardEntry) -> Result<(), AddLeaderboardEntryError> {
+    pub async fn add_normal_entry(
+        &self,
+        entry: LeaderboardEntry,
+    ) -> Result<(), AddLeaderboardEntryError> {
         self.add_leaderboard_entry(
             &self.inner.normal_leaderboard,
             &self.inner.normal_leaderboard_updater,
             entry,
-            "normal"
-        ).await
+            "normal",
+        )
+        .await
     }
-    pub async fn add_expert_entry(&self, entry: LeaderboardEntry) -> Result<(), AddLeaderboardEntryError> {
+    pub async fn add_expert_entry(
+        &self,
+        entry: LeaderboardEntry,
+    ) -> Result<(), AddLeaderboardEntryError> {
         self.add_leaderboard_entry(
             &self.inner.expert_leaderboard,
             &self.inner.expert_leaderboard_updater,
             entry,
-            "expert"
-        ).await
+            "expert",
+        )
+        .await
     }
     pub async fn wait_for_easy_update(&self) -> Option<LeaderboardUpdate> {
-        self
-            .inner
+        self.inner
             .easy_leaderboard_updater
             .subscribe()
             .recv()
@@ -162,8 +188,7 @@ impl Leaderboard {
             .ok()
     }
     pub async fn wait_for_normal_update(&self) -> Option<LeaderboardUpdate> {
-        self
-            .inner
+        self.inner
             .normal_leaderboard_updater
             .subscribe()
             .recv()
@@ -171,8 +196,7 @@ impl Leaderboard {
             .ok()
     }
     pub async fn wait_for_expert_update(&self) -> Option<LeaderboardUpdate> {
-        self
-            .inner
+        self.inner
             .expert_leaderboard_updater
             .subscribe()
             .recv()

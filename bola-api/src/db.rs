@@ -1,8 +1,11 @@
-use std::{collections::HashMap};
+use std::collections::HashMap;
 
-use aws_sdk_dynamodb::{model::AttributeValue, Client, error::{GetItemErrorKind}};
+use aws_sdk_dynamodb::{error::GetItemErrorKind, model::AttributeValue, Client};
 use aws_types::SdkConfig;
-use mangle_api_core::{serde::{Deserialize, self, Serialize}, anyhow::{Error, anyhow}};
+use mangle_api_core::{
+    anyhow::{anyhow, Error},
+    serde::{self, Deserialize, Serialize},
+};
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
 #[serde(crate = "serde")]
@@ -18,7 +21,6 @@ pub struct UserProfile {
     pub tournament_wins: Vec<u16>,
 }
 
-
 #[derive(Clone)]
 pub struct DB {
     pub client: Client,
@@ -33,7 +35,10 @@ impl DB {
         }
     }
 
-    pub async fn get_email_from_username(&self, username: impl Into<String>) -> Result<Option<String>, Error> {
+    pub async fn get_email_from_username(
+        &self,
+        username: impl Into<String>,
+    ) -> Result<Option<String>, Error> {
         let username = username.into();
 
         let query = self
@@ -54,19 +59,18 @@ impl DB {
             {
                 return Ok(None)
             };
-            
+
         Ok(Some(
             item.get("email")
                 .ok_or_else(|| anyhow!("user: {username} had no email!"))?
                 .as_s()
                 .map_err(|_| anyhow!("user: {username} had non-string email"))?
-                .clone()
+                .clone(),
         ))
     }
 
     pub async fn is_username_taken(&self, username: impl Into<String>) -> Result<bool, Error> {
-        self
-            .client
+        self.client
             .query()
             .table_name(self.bola_profiles_table.clone())
             .index_name("username-index")
@@ -137,8 +141,8 @@ impl DB {
             Ok(x) => Ok(x),
             Err(e) => match &e.kind {
                 GetItemErrorKind::ResourceNotFoundException(_) => return Ok(None),
-                _ => Err(e)
-            }
+                _ => Err(e),
+            },
         }?;
 
         let Some(item) = item.item() else {
@@ -151,7 +155,10 @@ impl DB {
     fn map_to_user_profile(map: &HashMap<String, AttributeValue>) -> Result<UserProfile, Error> {
         macro_rules! err {
             ($field_name: literal) => {
-                anyhow!("Could not deserialize field: {} in user profile", $field_name)
+                anyhow!(
+                    "Could not deserialize field: {} in user profile",
+                    $field_name
+                )
             };
         }
         macro_rules! deser {
@@ -177,26 +184,23 @@ impl DB {
                     Some(nums) => {
                         let mut out = Vec::with_capacity(nums.len());
                         for num in nums {
-                            out.push(
-                                num.parse()
-                                    .map_err(|_| err!("tournament_wins"))?
-                            );
+                            out.push(num.parse().map_err(|_| err!("tournament_wins"))?);
                         }
                         out
                     }
-                    None => vec![]
+                    None => vec![],
                 }
             },
             username: deser!("username", as_s)
                 .ok_or_else(|| anyhow!("Missing username in user profile"))?
-                .clone()
+                .clone(),
         })
     }
 
     pub async fn create_user_profile(
         &self,
         email: impl Into<String>,
-        profile: UserProfile
+        profile: UserProfile,
     ) -> Result<(), Error> {
         let email = email.into();
 
@@ -205,25 +209,36 @@ impl DB {
             .put_item()
             .table_name(self.bola_profiles_table.clone())
             .item("email", AttributeValue::S(email))
-            .item("easy_highscore", AttributeValue::N(profile.easy_highscore.to_string()))
-            .item("normal_highscore", AttributeValue::N(profile.normal_highscore.to_string()))
-            .item("expert_highscore", AttributeValue::N(profile.expert_highscore.to_string()))
+            .item(
+                "easy_highscore",
+                AttributeValue::N(profile.easy_highscore.to_string()),
+            )
+            .item(
+                "normal_highscore",
+                AttributeValue::N(profile.normal_highscore.to_string()),
+            )
+            .item(
+                "expert_highscore",
+                AttributeValue::N(profile.expert_highscore.to_string()),
+            )
             .item("username", AttributeValue::S(profile.username));
 
         if !profile.tournament_wins.is_empty() {
-            request = request
-                .item(
-                    "tournament_wins",
-                    AttributeValue::Ns(profile.tournament_wins.iter().map(ToString::to_string).collect())
-                );
+            request = request.item(
+                "tournament_wins",
+                AttributeValue::Ns(
+                    profile
+                        .tournament_wins
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                ),
+            );
         }
 
-        match request
-            .send()
-            .await
-        {
+        match request.send().await {
             Ok(_) => Ok(()),
-            Err(e) => Err(e.into())
+            Err(e) => Err(e.into()),
         }
     }
 }

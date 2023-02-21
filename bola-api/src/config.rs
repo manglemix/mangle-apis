@@ -33,7 +33,7 @@ pub struct Config {
     #[serde(default = "token_duration")]
     pub token_duration: u64,
     #[serde(default = "Default::default")]
-    pub sibling_domains: HashMap<String, SocketAddr>
+    pub sibling_domains: HashMap<String, SocketAddr>,
 }
 
 // impl BaseConfig for Config {
@@ -113,7 +113,6 @@ fn token_duration() -> u64 {
     // 30 days
     60 * 60 * 24 * 30
 }
-
 
 fn network_port() -> u16 {
     10419

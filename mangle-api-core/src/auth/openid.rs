@@ -161,8 +161,8 @@ impl OIDCState {
         let mut token = match client.request_token(&auth_code).await {
             Ok(x) => match openid::Token::from(x).id_token {
                 Some(x) => x,
-                None => return Html(pages.internal_error.into_owned())
-            }
+                None => return Html(pages.internal_error.into_owned()),
+            },
             Err(e) => {
                 return match e {
                     ClientError::OAuth2(e) => match e.error {
@@ -175,10 +175,10 @@ impl OIDCState {
         };
 
         if let Err(_) = client.decode_token(&mut token) {
-            return Html(pages.internal_error.into_owned())
+            return Html(pages.internal_error.into_owned());
         }
         if let Err(_) = client.validate_token(&token, None, None) {
-            return Html(pages.invalid.into_owned())
+            return Html(pages.invalid.into_owned());
         }
         let userinfo = token.payload().unwrap().userinfo.clone();
 

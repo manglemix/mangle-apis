@@ -1,17 +1,10 @@
-use std::{
-    borrow::Cow,
-    time::Duration,
-};
+use std::{borrow::Cow, time::Duration};
 
-use axum::{
-    extract::ws::{CloseFrame, Message, WebSocket},
-};
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use tokio::{
-    spawn,
-    sync::{
-        mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    },
-    time::sleep, select,
+    select, spawn,
+    sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    time::sleep,
 };
 
 const WEBSOCKET_PING: &str = "PING!!";
@@ -20,26 +13,24 @@ const WEBSOCKET_PING: &str = "PING!!";
 pub enum WebSocketCode {
     Ok = 1000,
     BadPayload = 1007,
-    InternalError = 1011
+    InternalError = 1011,
 }
-
 
 /// A wrapper around a WebSocket that does 3 things
 /// 1. Pings the other end at a regular rate
 /// 2. Provide a non-blocking way to send messages
 /// 3. Provide an easy to use api with foolproof error handling
-/// 
+///
 /// This is achieved by managing the WebSocket in a separate, asynchronous task
 /// where messages are sent to and from
 pub struct ManagedWebSocket {
     msg_sender: UnboundedSender<Message>,
-    msg_receiver: UnboundedReceiver<Message>
+    msg_receiver: UnboundedReceiver<Message>,
 }
-
 
 impl ManagedWebSocket {
     /// Wraps the given WebSocket and pings it every `ping_delay`.
-    /// 
+    ///
     /// The timer for pinging is reset every time a message is sent or received
     pub fn new(mut ws: WebSocket, ping_delay: Duration) -> Self {
         let (msg_sender, mut task_msg_receiver) = unbounded_channel();
@@ -91,12 +82,12 @@ impl ManagedWebSocket {
 
         Self {
             msg_sender,
-            msg_receiver
+            msg_receiver,
         }
     }
 
     /// Queues the given message for sending.
-    /// 
+    ///
     /// Returns `None` if the WebSocket faced an error before this method was called,
     /// thus dropping `self`
     pub fn send(self, msg: impl Into<Message>) -> Option<Self> {
@@ -108,25 +99,19 @@ impl ManagedWebSocket {
     }
 
     /// Waits for a message from the other end of the WebSocket
-    /// 
+    ///
     /// Returns `None` if the WebSocket faced an error before this method was called, or while waiting,
     /// thus dropping `self`
     pub async fn recv(mut self) -> Option<(Self, Message)> {
-        self
-            .msg_receiver
-            .recv()
-            .await
-            .map(move |msg| {
-                (self, msg)
-            })
+        self.msg_receiver.recv().await.map(move |msg| (self, msg))
     }
 
     /// Repeeatedly collects Messages from the other end of the WebSocket until an error occurs.
-    /// 
+    ///
     /// If the WebSocket faced an error, the given `ws` Option will be set to None.
-    /// 
+    ///
     /// If the given `msgs` is not None, the vector will be filled with Messages that were received.
-    /// 
+    ///
     /// # Cancel Safety
     /// It is safe to cancel this Future; It will not stop the WebSocket from continuing to receive messages
     /// outside of the Future
@@ -148,13 +133,9 @@ impl ManagedWebSocket {
     }
 
     pub fn close_frame(self, code: WebSocketCode, reason: impl Into<Cow<'static, str>>) {
-        let _ = self.msg_sender.send(
-            Message::Close(Some(
-                CloseFrame {
-                    code: code as u16,
-                    reason: reason.into()
-                }
-            ))
-        );
+        let _ = self.msg_sender.send(Message::Close(Some(CloseFrame {
+            code: code as u16,
+            reason: reason.into(),
+        })));
     }
 }

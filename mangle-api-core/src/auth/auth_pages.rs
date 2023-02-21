@@ -1,7 +1,5 @@
 use std::{borrow::Cow, mem::transmute, sync::Arc};
 
-use axum::extract::FromRef;
-
 pub struct AuthPagesSrc {
     pub late: String,
     pub invalid: String,
