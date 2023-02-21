@@ -1,13 +1,13 @@
 use mangle_api_core::{
-    distributed::{MessageRouter, NetworkMessageSet},
-    serde::{self, Deserialize, Serialize},
-    tokio::sync::broadcast::{channel, Receiver, Sender},
+    distributed::{MessageRouter, NetworkMessageSet}
 };
+use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast::{channel, Receiver, Sender};
+use derive_more::From;
 
 const MESSAGE_ROUTER_BUFFER_SIZE: usize = 8;
 
 #[derive(Clone, Deserialize, Serialize)]
-#[serde(crate = "serde")]
 pub struct HighscoreUpdate {
     pub difficulty: String,
     pub username: String,
@@ -33,7 +33,7 @@ impl MessageRouter<NetworkMessage> for NetworkMessageRouter {
         }
     }
 
-    fn route_message(&self, domain: &std::sync::Arc<str>, message: NetworkMessage) -> bool {
+    fn route_message(&self, _domain: &std::sync::Arc<str>, message: NetworkMessage) -> bool {
         match message {
             NetworkMessage::HighscoreUpdate(msg) => self.highscore_updater.send(msg).is_ok(),
         }
@@ -46,8 +46,7 @@ impl NetworkMessageRouter {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(crate = "serde")]
+#[derive(Clone, Deserialize, Serialize, From)]
 pub enum NetworkMessage {
     HighscoreUpdate(HighscoreUpdate),
 }

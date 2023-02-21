@@ -14,27 +14,6 @@ use tokio::{
     time::sleep,
 };
 
-// #[derive(Clone, Hash)]
-// pub struct Token<const N: u8>(HeaderValue);
-
-// impl<const N: u8> Into<String> for Token<N> {
-//     fn into(self) -> String {
-//         unsafe { String::from_utf8_unchecked(self.0.as_bytes().into()) }
-//     }
-// }
-
-// impl<const N: u8> TryFrom<HeaderValue> for Token<N> {
-//     type Error = HeaderValue;
-
-//     fn try_from(value: HeaderValue) -> Result<Self, Self::Error> {
-//         if value.len() != N as usize {
-//             Err(value)
-//         } else {
-//             Ok(Self(value))
-//         }
-//     }
-// }
-
 struct TokenData<T> {
     _sender: Sender<()>,
     data: Arc<T>,

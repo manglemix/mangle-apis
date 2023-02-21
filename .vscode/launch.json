@@ -20,7 +20,10 @@
                 }
             },
             "args": ["start"],
-            "cwd": "${workspaceFolder}/test_ws/us"
+            "cwd": "${workspaceFolder}/test_ws/us",
+            "env": {
+                "BOLA_PIPE_NAME": "bola_piper"
+            }
         },
     ]
 }

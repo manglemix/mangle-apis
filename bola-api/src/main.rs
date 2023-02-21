@@ -1,10 +1,19 @@
+#![feature(trivial_bounds)]
+
 use std::{net::ToSocketAddrs, ops::Deref, time::Duration};
 
 // use aws_config::{SdkConfig};
 use db::{UserProfile, DB};
-use leaderboard::Leaderboard;
+use leaderboard::{Leaderboard, update_easy_highscore, update_normal_highscore, update_expert_highscore};
+use axum::{
+    extract::{ws::Message, FromRef, State, WebSocketUpgrade},
+    http::{HeaderValue, StatusCode},
+    response::Response,
+    routing::{get, post},
+};
+use tokio::{self, select};
+use anyhow::{self, Context};
 use mangle_api_core::{
-    anyhow::{self, Context},
     auth::{
         auth_pages::{AuthPages, AuthPagesSrc},
         openid::{
@@ -13,21 +22,15 @@ use mangle_api_core::{
         },
         token::{HeaderTokenGranter, VerifiedToken},
     },
-    axum::{
-        extract::{ws::Message, FromRef, State, WebSocketUpgrade},
-        http::{HeaderValue, StatusCode},
-        response::Response,
-        routing::get,
-    },
     create_header_token_granter,
     distributed::Node,
     get_pipe_name,
     log::error,
     make_app, openid_redirect, pre_matches, serde_json, start_api,
-    tokio::{self, select},
     ws::{ManagedWebSocket, WebSocketCode},
     BaseConfig, BindAddress,
 };
+
 
 mod config;
 mod db;
@@ -38,7 +41,7 @@ use config::Config;
 use network::NetworkMessage;
 use rustrict::CensorStr;
 
-create_header_token_granter!( LoginTokenGranter "LoginToken" 32 String);
+create_header_token_granter!( LoginTokenGranter "Login-Token" 32 String);
 
 #[derive(Clone)]
 struct GlobalState {
@@ -80,6 +83,13 @@ impl FromRef<GlobalState> for OIDCState {
         input.oidc_state.clone()
     }
 }
+
+impl FromRef<GlobalState> for Leaderboard {
+    fn from_ref(input: &GlobalState) -> Self {
+        input.leaderboard.clone()
+    }
+}
+
 
 async fn login(
     State(GoogleOIDC(oidc)): State<GoogleOIDC>,
@@ -289,6 +299,9 @@ async fn main() -> anyhow::Result<()> {
             // ("/sign_up", post(sign_up)),
             ("/login", get(login)),
             ("/quick_login", get(quick_login)),
+            ("/highscore/easy", post(update_easy_highscore)),
+            ("/highscore/normal", post(update_normal_highscore)),
+            ("/highscore/expert", post(update_expert_highscore))
         ],
     )
     .await

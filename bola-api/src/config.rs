@@ -1,9 +1,9 @@
 use std::{collections::HashMap, net::SocketAddr};
 
-use mangle_api_core::serde::Deserialize;
+use serde::Deserialize;
+
 
 #[derive(Deserialize)]
-#[serde(crate = "mangle_api_core::serde")]
 pub struct Config {
     #[serde(default = "default_server_address")]
     pub server_address: String,

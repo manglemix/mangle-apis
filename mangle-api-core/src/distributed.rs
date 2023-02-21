@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, ops::Deref, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::Error;
 use bimap::BiMap;
@@ -137,16 +137,22 @@ impl<T: NetworkMessageSet> Node<T> {
             .map_err(Into::into)
     }
 
-    pub async fn broadcast_message(&self, message: &T) -> Vec<(&str, Error)> {
+    pub async fn broadcast_message(&self, message: &T) -> Vec<(String, Error)> {
         let message = serialize(message).expect("message to serialize");
         let mut results = vec![];
+        let domains = self
+            .inner
+            .sibling_domains
+            .left_values()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
 
-        for domain in self.inner.sibling_domains.left_values() {
+        for domain in domains {
             let connection =
-                match TcpStream::connect((domain.deref(), self.inner.network_port)).await {
+                match TcpStream::connect((domain.as_str(), self.inner.network_port)).await {
                     Ok(x) => x,
                     Err(e) => {
-                        results.push((domain.deref(), e.into()));
+                        results.push((domain, e.into()));
                         continue;
                     }
                 };
@@ -162,7 +168,7 @@ impl<T: NetworkMessageSet> Node<T> {
             };
             match connection.write_all(message.as_slice()).await {
                 Ok(_) => {}
-                Err(e) => results.push((domain.deref(), e.into())),
+                Err(e) => results.push((domain, e.into())),
             }
         }
 

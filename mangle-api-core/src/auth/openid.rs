@@ -204,7 +204,7 @@ pub async fn oidc_redirect_handler(
 #[macro_export]
 macro_rules! openid_redirect {
     () => {
-        $crate::axum::routing::get($crate::auth::openid::oidc_redirect_handler)
+        axum::routing::get($crate::auth::openid::oidc_redirect_handler)
     };
 }
 

@@ -2,16 +2,18 @@ use std::sync::Arc;
 
 use aws_sdk_dynamodb::model::{AttributeAction, AttributeValue, AttributeValueUpdate};
 use mangle_api_core::{
-    anyhow,
     distributed::Node,
     log::error,
     parking_lot::RwLock,
-    tokio::sync::broadcast::{channel, Sender},
+    auth::token::VerifiedToken
 };
+use axum::{http::StatusCode, extract::State, Json};
+use serde::Deserialize;
+use tokio::{sync::broadcast::{channel, Sender}, spawn};
 
 use crate::{
     db::DB,
-    network::{HighscoreUpdate, NetworkMessage},
+    network::{HighscoreUpdate, NetworkMessage}, LoginTokenGranter, GlobalState,
 };
 
 const LEADERBOARD_UPDATE_BUFFER_SIZE: usize = 8;
@@ -24,7 +26,7 @@ pub struct LeaderboardUpdate {
 #[derive(PartialOrd, PartialEq, Ord, Eq, Clone)]
 pub struct LeaderboardEntry {
     score: u16,
-    username: String,
+    email: String,
 }
 
 struct LeaderboardImpl {
@@ -55,19 +57,74 @@ impl Leaderboard {
         node: Node<NetworkMessage>,
         leaderboard_span: usize,
     ) -> Result<Self, anyhow::Error> {
-        Ok(Self {
-            inner: Arc::new(LeaderboardImpl {
-                easy_leaderboard: Default::default(),
-                normal_leaderboard: Default::default(),
-                expert_leaderboard: Default::default(),
-                leaderboard_span,
-                easy_leaderboard_updater: channel(LEADERBOARD_UPDATE_BUFFER_SIZE).0,
-                normal_leaderboard_updater: channel(LEADERBOARD_UPDATE_BUFFER_SIZE).0,
-                expert_leaderboard_updater: channel(LEADERBOARD_UPDATE_BUFFER_SIZE).0,
-                db,
-                node,
-            }),
-        })
+        let inner2 =  Arc::new(LeaderboardImpl {
+            easy_leaderboard: Default::default(),
+            normal_leaderboard: Default::default(),
+            expert_leaderboard: Default::default(),
+            leaderboard_span,
+            easy_leaderboard_updater: channel(LEADERBOARD_UPDATE_BUFFER_SIZE).0,
+            normal_leaderboard_updater: channel(LEADERBOARD_UPDATE_BUFFER_SIZE).0,
+            expert_leaderboard_updater: channel(LEADERBOARD_UPDATE_BUFFER_SIZE).0,
+            db,
+            node: node.clone(),
+        });
+        let inner = inner2.clone();
+        let mut subscription = node.get_message_router().subscribe_to_highscore_update();
+
+        spawn(async move {
+            loop {
+                let Some(msg) = subscription.wait_for_update().await else {
+                    break
+                };
+
+                let (leaderboard, updater) = match msg.difficulty.as_str() {
+                    "easy" => (&inner.easy_leaderboard, &inner.easy_leaderboard_updater),
+                    "normal" => (&inner.normal_leaderboard, &inner.normal_leaderboard_updater),
+                    "expert" => (&inner.expert_leaderboard, &inner.expert_leaderboard_updater),
+                    s => {
+                        error!(target: "leaderboard", "Found unexpected leaderboard_difficulty: {s}");
+                        continue
+                    }
+                };
+
+                Self::local_update_leaderboard(
+                    leaderboard_span,
+                    leaderboard,
+                    LeaderboardEntry {
+                        score: msg.score,
+                        email: msg.username
+                    },
+                    updater
+                );
+            }
+        });
+
+        Ok(Self { inner: inner2 })
+    }
+
+    fn local_update_leaderboard(
+        leaderboard_span: usize,
+        leaderboard: &RwLock<Vec<LeaderboardEntry>>,
+        entry: LeaderboardEntry,
+        updater: &Sender<LeaderboardUpdate>
+    ) -> bool {
+        let mut leaderboard_writer = leaderboard.write();
+
+        let Err(idx) = leaderboard_writer.binary_search(&entry) else {
+            return false
+        };
+
+        leaderboard_writer.insert(idx, entry.clone());
+
+        if leaderboard_writer.len() > leaderboard_span {
+            leaderboard_writer.pop();
+        }
+
+        let _ = updater.send(LeaderboardUpdate {
+            leaderboard: Arc::new(leaderboard_writer.clone()),
+        });
+
+        true
     }
 
     async fn add_leaderboard_entry(
@@ -82,30 +139,14 @@ impl Leaderboard {
             "easy" | "normal" | "expert"
         ));
 
-        let mut leaderboard_writer = leaderboard.write();
-
-        let Err(idx) = leaderboard_writer.binary_search(&entry) else {
-            return Ok(())
-        };
-
-        leaderboard_writer.insert(idx, entry.clone());
-
-        if leaderboard_writer.len() > self.inner.leaderboard_span {
-            leaderboard_writer.pop();
-        }
-
-        let _ = updater.send(LeaderboardUpdate {
-            leaderboard: Arc::new(leaderboard_writer.clone()),
-        });
-
-        let email = match self.inner.db.get_email_from_username(&entry.username).await {
-            Ok(Some(x)) => x,
-            Ok(None) => return Err(AddLeaderboardEntryError::NotAUser),
-            Err(e) => {
-                error!(target: "leaderboard", "Error getting email for {}: {e:?}", entry.username);
-                return Err(AddLeaderboardEntryError::InternalError);
-            }
-        };
+        // let email = match self.inner.db.get_email_from_username(&entry.username).await {
+        //     Ok(Some(x)) => x,
+        //     Ok(None) => return Err(AddLeaderboardEntryError::NotAUser),
+        //     Err(e) => {
+        //         error!(target: "leaderboard", "Error getting email for {}: {e:?}", entry.username);
+        //         return Err(AddLeaderboardEntryError::InternalError);
+        //     }
+        // };
 
         if let Err(e) = self
             .inner
@@ -113,7 +154,7 @@ impl Leaderboard {
             .client
             .update_item()
             .table_name(self.inner.db.bola_profiles_table.clone())
-            .key("email", AttributeValue::S(email))
+            .key("email", AttributeValue::S(entry.email.clone()))
             .attribute_updates(
                 format!("{leaderboard_difficulty}_highscore"),
                 AttributeValueUpdate::builder()
@@ -124,15 +165,24 @@ impl Leaderboard {
             .send()
             .await
         {
-            error!(target: "leaderboard", "Error updating item for {}: {e:?}", entry.username);
+            error!(target: "leaderboard", "Error updating item for {}: {e:?}", entry.email);
             return Err(AddLeaderboardEntryError::InternalError);
         }
+
+        if !Self::local_update_leaderboard(
+            self.inner.leaderboard_span,
+            leaderboard,
+            entry.clone(),
+            updater
+        ) {
+            return Ok(())
+        };
 
         for (domain, err) in self
             .inner
             .node
             .broadcast_message(&NetworkMessage::HighscoreUpdate(HighscoreUpdate {
-                username: entry.username,
+                username: entry.email,
                 difficulty: leaderboard_difficulty.into(),
                 score: entry.score,
             }))
@@ -203,4 +253,57 @@ impl Leaderboard {
             .await
             .ok()
     }
+}
+
+
+#[derive(Deserialize)]
+pub struct HighscoreUpdateBody {
+    score: u16
+}
+
+
+macro_rules! update_score {
+    ($fn: ident, $data: expr, $leaderboard: expr, $token: expr) => {
+        if let Err(e) = $leaderboard.$fn(LeaderboardEntry {
+            score: $data.score,
+            email: $token.item.to_string()
+        }).await {
+            match e {
+                AddLeaderboardEntryError::NotAUser => StatusCode::BAD_REQUEST,
+                AddLeaderboardEntryError::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
+            }
+        } else {
+            StatusCode::OK
+        }
+    };
+}
+
+
+#[axum::debug_handler]
+pub(crate) async fn update_easy_highscore(
+    token: VerifiedToken<LoginTokenGranter>,
+    State(GlobalState{ leaderboard, .. }): State<GlobalState>,
+    Json(data): Json<HighscoreUpdateBody>
+) -> StatusCode {
+    update_score!(add_easy_entry, data, leaderboard, token)
+}
+
+
+#[axum::debug_handler]
+pub(crate) async fn update_normal_highscore(
+    token: VerifiedToken<LoginTokenGranter>,
+    State(GlobalState{ leaderboard, .. }): State<GlobalState>,
+    Json(data): Json<HighscoreUpdateBody>
+) -> StatusCode {
+    update_score!(add_normal_entry, data, leaderboard, token)
+}
+
+
+#[axum::debug_handler]
+pub(crate) async fn update_expert_highscore(
+    token: VerifiedToken<LoginTokenGranter>,
+    State(GlobalState{ leaderboard, .. }): State<GlobalState>,
+    Json(data): Json<HighscoreUpdateBody>
+) -> StatusCode {
+    update_score!(add_expert_entry, data, leaderboard, token)
 }

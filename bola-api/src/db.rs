@@ -2,13 +2,10 @@ use std::collections::HashMap;
 
 use aws_sdk_dynamodb::{error::GetItemErrorKind, model::AttributeValue, Client};
 use aws_types::SdkConfig;
-use mangle_api_core::{
-    anyhow::{anyhow, Error},
-    serde::{self, Deserialize, Serialize},
-};
+use anyhow::{anyhow, Error};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
-#[serde(crate = "serde")]
 pub struct UserProfile {
     pub username: String,
     #[serde(default = "Default::default")]
