@@ -1,9 +1,7 @@
-use mangle_api_core::{
-    distributed::{MessageRouter, NetworkMessageSet}
-};
+use derive_more::From;
+use mangle_api_core::distributed::{MessageRouter, NetworkMessageSet};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{channel, Receiver, Sender};
-use derive_more::From;
 
 const MESSAGE_ROUTER_BUFFER_SIZE: usize = 8;
 

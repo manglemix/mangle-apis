@@ -1,7 +1,8 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{mem::take, net::SocketAddr, sync::Arc};
 
 use anyhow::Error;
 use bimap::BiMap;
+use parking_lot::Mutex;
 use serde::{de::DeserializeOwned, Serialize};
 // use parking_lot::Mutex;
 use bincode::{deserialize, serialize};
@@ -9,6 +10,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     spawn,
+    task::JoinHandle,
 };
 #[cfg(not(debug_assertions))]
 use tokio_native_tls::{
@@ -38,6 +40,13 @@ struct NodeImpl<T: NetworkMessageSet> {
     // message_receiver: broadcast::Receiver<(&'static str, T)>,
     // connections: Mutex<HashMap<&'static str, TlsStream<TcpStream>>>,
     network_port: u16,
+    task_handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl<T: NetworkMessageSet> Drop for NodeImpl<T> {
+    fn drop(&mut self) {
+        take(self.task_handle.get_mut()).unwrap().abort();
+    }
 }
 
 #[derive(Clone)]
@@ -62,9 +71,13 @@ impl<T: NetworkMessageSet> Node<T> {
             // connections: Mutex::new(HashMap::with_capacity(sibling_domains.len())),
             sibling_domains: sibling_domains
                 .into_iter()
-                .map(|(domain, addr)| unsafe { (Arc::from(Box::from_raw(domain.leak())), addr) })
+                .map(|(mut domain, addr)| unsafe {
+                    domain.shrink_to_fit();
+                    (Arc::from(Box::from_raw(domain.leak())), addr)
+                })
                 .collect(),
             network_port,
+            task_handle: Default::default(),
         });
 
         let inner = inner2.clone();
@@ -72,7 +85,7 @@ impl<T: NetworkMessageSet> Node<T> {
         let tls_acceptor = TlsAcceptorWrapper::from(TlsAcceptor::new(identity)?);
         let acceptor = TcpListener::bind(("0.0.0.0", network_port)).await?;
 
-        spawn(async move {
+        *inner2.task_handle.lock() = Some(spawn(async move {
             loop {
                 let Ok((stream, addr)) = acceptor.accept().await else { continue };
 
@@ -100,19 +113,10 @@ impl<T: NetworkMessageSet> Node<T> {
                         return
                     };
 
-                    if !T::MessageRouter::route_message(
-                        &inner2.message_router,
-                        connection_domain,
-                        msg,
-                    ) {
-                        return;
-                    }
-                    // if !inner2.message_router.route_message(connection_domain, msg) {
-                    //     return
-                    // }
+                    T::MessageRouter::route_message(&inner2.message_router, connection_domain, msg);
                 });
             }
-        });
+        }));
 
         Ok(Self { inner: inner2 })
     }

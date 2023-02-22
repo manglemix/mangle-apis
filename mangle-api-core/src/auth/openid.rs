@@ -4,6 +4,7 @@ use axum::{
     extract::{Query, State},
     response::Html,
 };
+use log::error;
 use openid::{error::ClientError, DiscoveredClient, Options};
 use parking_lot::Mutex;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
@@ -174,10 +175,14 @@ impl OIDCState {
             }
         };
 
-        if let Err(_) = client.decode_token(&mut token) {
+        if let Err(e) = client.decode_token(&mut token) {
+            let e = anyhow::Error::from(e);
+            error!(target: "openid", "{:?}", e.context("decoding openid token"));
             return Html(pages.internal_error.into_owned());
         }
-        if let Err(_) = client.validate_token(&token, None, None) {
+        if let Err(e) = client.validate_token(&token, None, None) {
+            let e = anyhow::Error::from(e);
+            error!(target: "openid", "{:?}", e.context("validating openid token"));
             return Html(pages.invalid.into_owned());
         }
         let userinfo = token.payload().unwrap().userinfo.clone();

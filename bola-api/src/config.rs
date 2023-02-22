@@ -2,7 +2,6 @@ use std::{collections::HashMap, net::SocketAddr};
 
 use serde::Deserialize;
 
-
 #[derive(Deserialize)]
 pub struct Config {
     #[serde(default = "default_server_address")]

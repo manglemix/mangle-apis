@@ -1,18 +1,20 @@
 #![feature(trivial_bounds)]
 
-use std::{net::ToSocketAddrs, ops::Deref, time::Duration};
+use std::{net::ToSocketAddrs, time::Duration};
 
 // use aws_config::{SdkConfig};
-use db::{UserProfile, DB};
-use leaderboard::{Leaderboard, update_easy_highscore, update_normal_highscore, update_expert_highscore};
+use anyhow::{self, Context};
 use axum::{
     extract::{ws::Message, FromRef, State, WebSocketUpgrade},
     http::{HeaderValue, StatusCode},
     response::Response,
     routing::{get, post},
 };
-use tokio::{self, select};
-use anyhow::{self, Context};
+use db::{UserProfile, DB};
+use leaderboard::{
+    get_easy_leaderboard, get_expert_leaderboard, get_normal_leaderboard, update_easy_highscore,
+    update_expert_highscore, update_normal_highscore, Leaderboard, LeaderboardEntry,
+};
 use mangle_api_core::{
     auth::{
         auth_pages::{AuthPages, AuthPagesSrc},
@@ -30,18 +32,26 @@ use mangle_api_core::{
     ws::{ManagedWebSocket, WebSocketCode},
     BaseConfig, BindAddress,
 };
-
+use tokio::{self, select};
 
 mod config;
 mod db;
 mod leaderboard;
 mod network;
 
+const WS_PING_DELAY: Duration = Duration::from_secs(45);
+
 use config::Config;
-use network::NetworkMessage;
+// use network::NetworkMessage;
 use rustrict::CensorStr;
 
-create_header_token_granter!( LoginTokenGranter "Login-Token" 32 String);
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct LoginTokenData {
+    username: String,
+    email: String,
+}
+
+create_header_token_granter!( LoginTokenGranter "Login-Token" 32 LoginTokenData);
 
 #[derive(Clone)]
 struct GlobalState {
@@ -50,7 +60,7 @@ struct GlobalState {
     goidc: GoogleOIDC,
     auth_pages: AuthPages,
     login_tokens: LoginTokenGranter,
-    node: Node<NetworkMessage>,
+    // node: Node<NetworkMessage>,
     leaderboard: Leaderboard,
 }
 
@@ -90,16 +100,16 @@ impl FromRef<GlobalState> for Leaderboard {
     }
 }
 
-
 async fn login(
     State(GoogleOIDC(oidc)): State<GoogleOIDC>,
+    State(leaderboard): State<Leaderboard>,
     State(db): State<DB>,
     State(token_granter): State<LoginTokenGranter>,
     ws: WebSocketUpgrade,
 ) -> Response {
     ws.on_upgrade(|ws| async move {
         let (auth_url, fut) = oidc.initiate_auth(["openid", "email"]);
-        let ws = ManagedWebSocket::new(ws, Duration::from_secs(45));
+        let ws = ManagedWebSocket::new(ws, WS_PING_DELAY);
 
         let Some(ws) = ws.send(auth_url.to_string()) else { return };
         let mut ws = Some(ws);
@@ -123,7 +133,10 @@ async fn login(
             Ok(Some(ref x)) => {
                 let Some(ws_tmp) = ws.send(serde_json::to_string(x).unwrap()) else { return };
                 let Some(ws_tmp) = ws_tmp.send(
-                    token_granter.create_token(email).to_str().unwrap()
+                    token_granter.create_token(LoginTokenData{
+                        email,
+                        username: x.username.clone()
+                    }).to_str().unwrap()
                 ) else { return };
                 ws = ws_tmp;
             }
@@ -165,7 +178,7 @@ async fn login(
                         }
                         Ok(false) => {}
                         Err(e) => {
-                            error!(target: "login", "{e:?}");
+                            error!(target: "login", "{:?}", e.context("checking if username is taken"));
                             ws.close_frame(WebSocketCode::InternalError, "");
                             return;
                         }
@@ -174,14 +187,43 @@ async fn login(
                     break;
                 }
 
-                if let Err(e) = db.create_user_profile(email.clone(), profile).await {
-                    error!(target: "login", "{e:?}");
+                if let Err(e) = db.create_user_profile(
+                    email.clone(),
+                    profile.username.clone(),
+                    profile.tournament_wins
+                ).await {
+                    error!(target: "login", "{:?}", e.context("creating user profile"));
                     ws.close_frame(WebSocketCode::InternalError, "");
                     return;
                 }
 
+                if let Err(e) = leaderboard.add_easy_entry(email.clone(), LeaderboardEntry {
+                    score:profile.easy_highscore,
+                    username: profile.username.clone(),
+                }).await {
+                    let e = anyhow::Error::from(e);
+                    error!(target: "login", "{:?}", e.context(format!("adding easy entry for {email}")));
+                }
+                if let Err(e) = leaderboard.add_normal_entry(email.clone(), LeaderboardEntry {
+                    score:profile.normal_highscore,
+                    username: profile.username.clone(),
+                }).await {
+                    let e = anyhow::Error::from(e);
+                    error!(target: "login", "{:?}", e.context(format!("adding normal entry for {email}")));
+                }
+                if let Err(e) = leaderboard.add_expert_entry(email.clone(), LeaderboardEntry {
+                    score:profile.easy_highscore,
+                    username: profile.username.clone(),
+                }).await {
+                    let e = anyhow::Error::from(e);
+                    error!(target: "login", "{:?}", e.context(format!("adding easy entry for {email}")));
+                }
+
                 let Some(ws_tmp) = ws.send(
-                    token_granter.create_token(email).to_str().unwrap()
+                    token_granter.create_token(LoginTokenData {
+                        email,
+                        username: profile.username
+                    }).to_str().unwrap()
                 ) else { return };
                 ws = ws_tmp;
             }
@@ -200,10 +242,7 @@ async fn quick_login(
     token: VerifiedToken<LoginTokenGranter>,
     State(db): State<DB>,
 ) -> (StatusCode, String) {
-    match db
-        .get_user_profile_by_email(token.item.deref().clone())
-        .await
-    {
+    match db.get_user_profile_by_email(token.item.email.clone()).await {
         Ok(Some(ref x)) => (
             StatusCode::OK,
             serde_json::to_string(x).expect("Correct serialization of UserProfile"),
@@ -251,9 +290,9 @@ async fn main() -> anyhow::Result<()> {
             success: "Success".into(),
         }),
         oidc_state,
-        login_tokens: LoginTokenGranter::new(Duration::from_secs(config.token_duration as u64)),
-        leaderboard: Leaderboard::new(db.clone(), node.clone(), 5).await?,
-        node,
+        login_tokens: LoginTokenGranter::new(Duration::from_secs(config.token_duration)),
+        leaderboard: Leaderboard::new(db.clone(), node, 5).await?,
+        // node,
         db,
     };
 
@@ -296,12 +335,14 @@ async fn main() -> anyhow::Result<()> {
         ["^/oidc/"],
         [
             ("/oidc/redirect", openid_redirect!()),
-            // ("/sign_up", post(sign_up)),
             ("/login", get(login)),
             ("/quick_login", get(quick_login)),
             ("/highscore/easy", post(update_easy_highscore)),
             ("/highscore/normal", post(update_normal_highscore)),
-            ("/highscore/expert", post(update_expert_highscore))
+            ("/highscore/expert", post(update_expert_highscore)),
+            ("/leaderboard/easy", get(get_easy_leaderboard)),
+            ("/leaderboard/normal", get(get_normal_leaderboard)),
+            ("/leaderboard/expert", get(get_expert_leaderboard)),
         ],
     )
     .await

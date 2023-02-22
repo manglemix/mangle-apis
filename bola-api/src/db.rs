@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use anyhow::{anyhow, Error};
 use aws_sdk_dynamodb::{error::GetItemErrorKind, model::AttributeValue, Client};
 use aws_types::SdkConfig;
-use anyhow::{anyhow, Error};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
@@ -32,39 +32,39 @@ impl DB {
         }
     }
 
-    pub async fn get_email_from_username(
-        &self,
-        username: impl Into<String>,
-    ) -> Result<Option<String>, Error> {
-        let username = username.into();
+    // pub async fn get_email_from_username(
+    //     &self,
+    //     username: impl Into<String>,
+    // ) -> Result<Option<String>, Error> {
+    //     let username = username.into();
 
-        let query = self
-            .client
-            .query()
-            .table_name(self.bola_profiles_table.clone())
-            .index_name("username-index")
-            .key_condition_expression("username = :check_username")
-            .expression_attribute_values(":check_username", AttributeValue::S(username.clone()))
-            .projection_expression("email")
-            .send()
-            .await
-            .map_err(Error::from)?;
+    //     let query = self
+    //         .client
+    //         .query()
+    //         .table_name(self.bola_profiles_table.clone())
+    //         .index_name("username-index")
+    //         .key_condition_expression("username = :check_username")
+    //         .expression_attribute_values(":check_username", AttributeValue::S(username.clone()))
+    //         .projection_expression("email")
+    //         .send()
+    //         .await
+    //         .map_err(Error::from)?;
 
-        let Some(item) = query.items()
-            .ok_or_else(|| anyhow!("query had no items field"))?
-            .first() else
-            {
-                return Ok(None)
-            };
+    //     let Some(item) = query.items()
+    //         .ok_or_else(|| anyhow!("query had no items field"))?
+    //         .first() else
+    //         {
+    //             return Ok(None)
+    //         };
 
-        Ok(Some(
-            item.get("email")
-                .ok_or_else(|| anyhow!("user: {username} had no email!"))?
-                .as_s()
-                .map_err(|_| anyhow!("user: {username} had non-string email"))?
-                .clone(),
-        ))
-    }
+    //     Ok(Some(
+    //         item.get("email")
+    //             .ok_or_else(|| anyhow!("user: {username} had no email!"))?
+    //             .as_s()
+    //             .map_err(|_| anyhow!("user: {username} had non-string email"))?
+    //             .clone(),
+    //     ))
+    // }
 
     pub async fn is_username_taken(&self, username: impl Into<String>) -> Result<bool, Error> {
         self.client
@@ -196,40 +196,25 @@ impl DB {
 
     pub async fn create_user_profile(
         &self,
-        email: impl Into<String>,
-        profile: UserProfile,
+        email: String,
+        username: String,
+        tournament_wins: Vec<u16>,
     ) -> Result<(), Error> {
-        let email = email.into();
-
         let mut request = self
             .client
             .put_item()
             .table_name(self.bola_profiles_table.clone())
             .item("email", AttributeValue::S(email))
-            .item(
-                "easy_highscore",
-                AttributeValue::N(profile.easy_highscore.to_string()),
-            )
-            .item(
-                "normal_highscore",
-                AttributeValue::N(profile.normal_highscore.to_string()),
-            )
-            .item(
-                "expert_highscore",
-                AttributeValue::N(profile.expert_highscore.to_string()),
-            )
-            .item("username", AttributeValue::S(profile.username));
+            .item("easy_highscore", AttributeValue::N("0".into()))
+            .item("normal_highscore", AttributeValue::N("0".into()))
+            .item("expert_highscore", AttributeValue::N("0".into()))
+            .item("username", AttributeValue::S(username))
+            .item("unused", AttributeValue::N("0".into()));
 
-        if !profile.tournament_wins.is_empty() {
+        if !tournament_wins.is_empty() {
             request = request.item(
                 "tournament_wins",
-                AttributeValue::Ns(
-                    profile
-                        .tournament_wins
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect(),
-                ),
+                AttributeValue::Ns(tournament_wins.iter().map(ToString::to_string).collect()),
             );
         }
 

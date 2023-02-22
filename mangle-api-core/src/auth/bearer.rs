@@ -21,7 +21,7 @@ impl<ResBody> Clone for BearerAuth<ResBody> {
         Self {
             api_token: self.api_token.clone(),
             public_paths: self.public_paths.clone(),
-            _phantom: self._phantom.clone(),
+            _phantom: self._phantom,
         }
     }
 }
