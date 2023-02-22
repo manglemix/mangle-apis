@@ -56,7 +56,7 @@ struct GlobalState {
 async fn main() -> anyhow::Result<()> {
     let app = make_app("BolaAPI", env!("CARGO_PKG_VERSION"), "The API for Bola", []);
 
-    let pipe_name = get_pipe_name("BOLA_PIPE_NAME", "bola_pipe");
+    let pipe_name = get_pipe_name("BOLA_PIPE_NAME", "/dev/bola_pipe");
 
     let Some(config) = pre_matches::<Config>(app.clone(), &pipe_name).await? else {
         return Ok(())

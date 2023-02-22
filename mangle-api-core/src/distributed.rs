@@ -45,7 +45,7 @@ struct NodeImpl<T: NetworkMessageSet> {
 
 impl<T: NetworkMessageSet> Drop for NodeImpl<T> {
     fn drop(&mut self) {
-        take(self.task_handle.get_mut()).unwrap().abort();
+        take(self.task_handle.get_mut()).map(|x| x.abort());
     }
 }
 

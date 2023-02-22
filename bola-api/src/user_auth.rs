@@ -1,14 +1,14 @@
-use std::{sync::Arc, ops::Deref};
+use std::{ops::Deref, sync::Arc};
 
 use axum::{
     body::BoxBody,
     extract::{ws::Message, State, WebSocketUpgrade},
-    http::{StatusCode, HeaderValue},
+    http::{HeaderValue, StatusCode},
     response::Response,
 };
 use mangle_api_core::{
     auth::token::{HeaderTokenGranter, VerifiedToken},
-    log::error,
+    log::{error, warn},
     serde_json,
     ws::{ManagedWebSocket, WebSocketCode},
 };
@@ -248,9 +248,19 @@ async fn logged_in(
         }};
     }
     loop {
+        #[cfg(not(debug_assertions))]
         let Message::Text(msg) = recv!() else {
             send!("Only text");
             continue;
+        };
+        #[cfg(debug_assertions)]
+        let msg = match recv!() {
+            Message::Text(x) => x,
+            x => {
+                warn!("Received unexpected message: {x:?}");
+                send!("Only text");
+                continue;
+            }
         };
         let Ok(msg) = serde_json::from_str::<MessageSet>(&msg) else {
             send!("Bad Request");

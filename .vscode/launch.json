@@ -22,7 +22,7 @@
             "args": ["start"],
             "cwd": "${workspaceFolder}/test_ws/us",
             "env": {
-                "BOLA_PIPE_NAME": "bola_piper"
+                "BOLA_PIPE_NAME": "/dev/bola_pipe"
             }
         },
     ]

@@ -94,10 +94,7 @@ impl<T: Send + Sync + Hash + Eq + 'static> BasicTokenGranter<T> {
     }
 
     pub fn verify_token(&self, token: &HeaderValue) -> Option<(Arc<HeaderValue>, Arc<T>)> {
-        let mut lock = self
-            .inner
-            .tokens
-            .lock();
+        let mut lock = self.inner.tokens.lock();
         let (token, entry) = lock.remove_by_left(token)?;
         let item = entry.item.clone();
         lock.insert(token.clone(), entry);
@@ -110,11 +107,17 @@ pub trait HeaderTokenGranter {
     const TOKEN_LENGTH: u8;
     const HEADER_NAME: &'static str;
 
-    fn create_token(&self, item: Self::AssociatedDataType) -> (Arc<HeaderValue>, Arc<Self::AssociatedDataType>);
+    fn create_token(
+        &self,
+        item: Self::AssociatedDataType,
+    ) -> (Arc<HeaderValue>, Arc<Self::AssociatedDataType>);
 
     fn revoke_token(&self, token: &HeaderValue) -> Option<Arc<Self::AssociatedDataType>>;
 
-    fn verify_token(&self, token: &HeaderValue) -> Option<(Arc<HeaderValue>, Arc<Self::AssociatedDataType>)>;
+    fn verify_token(
+        &self,
+        token: &HeaderValue,
+    ) -> Option<(Arc<HeaderValue>, Arc<Self::AssociatedDataType>)>;
 }
 
 #[macro_export]

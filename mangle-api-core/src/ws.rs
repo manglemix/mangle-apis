@@ -51,7 +51,7 @@ impl ManagedWebSocket {
                     // Message Receiver
                     opt = ws.recv() => {
                         if let Some(Ok(msg)) = opt {
-                            if task_msg_sender.send(msg).is_ok() {
+                            if matches!(msg, Message::Pong(_)) || task_msg_sender.send(msg).is_ok() {
                                 continue
                             }
                         }
