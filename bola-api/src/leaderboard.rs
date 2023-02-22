@@ -4,16 +4,14 @@ use anyhow::{anyhow, Context};
 use aws_sdk_dynamodb::model::{AttributeAction, AttributeValue, AttributeValueUpdate};
 use axum::{
     extract::{State, WebSocketUpgrade},
-    http::StatusCode,
     response::Response,
-    Json,
 };
 use derive_more::{Display, Error};
 use mangle_api_core::{
-    auth::token::VerifiedToken, distributed::Node, log::error, parking_lot::RwLock, serde_json,
+    distributed::Node, log::error, parking_lot::RwLock, serde_json,
     ws::ManagedWebSocket,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Serialize};
 use tokio::{
     select, spawn,
     sync::broadcast::{channel, Sender},
@@ -22,7 +20,7 @@ use tokio::{
 use crate::{
     db::DB,
     network::{HighscoreUpdate, NetworkMessage},
-    GlobalState, LoginTokenGranter, WS_PING_DELAY,
+    WS_PING_DELAY,
 };
 
 const LEADERBOARD_UPDATE_BUFFER_SIZE: usize = 8;
@@ -355,62 +353,6 @@ impl Leaderboard {
             .await
             .ok()
     }
-}
-
-#[derive(Deserialize)]
-pub struct HighscoreUpdateBody {
-    score: u16,
-}
-
-macro_rules! update_score {
-    ($fn: ident, $data: expr, $leaderboard: expr, $token: expr) => {{
-        let $crate::LoginTokenData { email, username } =
-            std::ops::Deref::deref(&$token.item).clone();
-
-        if let Err(e) = $leaderboard
-            .$fn(
-                email,
-                LeaderboardEntry {
-                    score: $data.score,
-                    username,
-                },
-            )
-            .await
-        {
-            match e {
-                AddLeaderboardEntryError::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
-            }
-        } else {
-            StatusCode::OK
-        }
-    }};
-}
-
-#[axum::debug_handler(state = GlobalState)]
-pub(crate) async fn update_easy_highscore(
-    token: VerifiedToken<LoginTokenGranter>,
-    State(leaderboard): State<Leaderboard>,
-    Json(data): Json<HighscoreUpdateBody>,
-) -> StatusCode {
-    update_score!(add_easy_entry, data, leaderboard, token)
-}
-
-#[axum::debug_handler(state = GlobalState)]
-pub(crate) async fn update_normal_highscore(
-    token: VerifiedToken<LoginTokenGranter>,
-    State(leaderboard): State<Leaderboard>,
-    Json(data): Json<HighscoreUpdateBody>,
-) -> StatusCode {
-    update_score!(add_normal_entry, data, leaderboard, token)
-}
-
-#[axum::debug_handler(state = GlobalState)]
-pub(crate) async fn update_expert_highscore(
-    token: VerifiedToken<LoginTokenGranter>,
-    State(leaderboard): State<Leaderboard>,
-    Json(data): Json<HighscoreUpdateBody>,
-) -> StatusCode {
-    update_score!(add_expert_entry, data, leaderboard, token)
 }
 
 macro_rules! get_leaderboard {

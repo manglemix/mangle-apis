@@ -5,15 +5,13 @@ use std::{net::ToSocketAddrs, time::Duration};
 // use aws_config::{SdkConfig};
 use anyhow::{self, Context};
 use axum::{
-    extract::{ws::Message, FromRef, State, WebSocketUpgrade},
-    http::{HeaderValue, StatusCode},
-    response::Response,
-    routing::{get, post},
+    extract::{FromRef},
+    http::{HeaderValue},
+    routing::{get},
 };
-use db::{UserProfile, DB};
+use db::{DB};
 use leaderboard::{
-    get_easy_leaderboard, get_expert_leaderboard, get_normal_leaderboard, update_easy_highscore,
-    update_expert_highscore, update_normal_highscore, Leaderboard, LeaderboardEntry,
+    get_easy_leaderboard, get_expert_leaderboard, get_normal_leaderboard, Leaderboard,
 };
 use mangle_api_core::{
     auth::{
@@ -22,28 +20,24 @@ use mangle_api_core::{
             google::{new_google_oidc_from_file, GoogleOIDC},
             OIDCState,
         },
-        token::{HeaderTokenGranter, VerifiedToken},
     },
     create_header_token_granter,
     distributed::Node,
     get_pipe_name,
-    log::error,
-    make_app, openid_redirect, pre_matches, serde_json, start_api,
-    ws::{ManagedWebSocket, WebSocketCode},
+    make_app, openid_redirect, pre_matches, start_api,
     BaseConfig, BindAddress,
 };
-use tokio::{self, select};
+use tokio::{self};
 
 mod config;
 mod db;
 mod leaderboard;
 mod network;
+mod user_auth;
 
 const WS_PING_DELAY: Duration = Duration::from_secs(45);
 
 use config::Config;
-// use network::NetworkMessage;
-use rustrict::CensorStr;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct LoginTokenData {
@@ -97,161 +91,6 @@ impl FromRef<GlobalState> for OIDCState {
 impl FromRef<GlobalState> for Leaderboard {
     fn from_ref(input: &GlobalState) -> Self {
         input.leaderboard.clone()
-    }
-}
-
-async fn login(
-    State(GoogleOIDC(oidc)): State<GoogleOIDC>,
-    State(leaderboard): State<Leaderboard>,
-    State(db): State<DB>,
-    State(token_granter): State<LoginTokenGranter>,
-    ws: WebSocketUpgrade,
-) -> Response {
-    ws.on_upgrade(|ws| async move {
-        let (auth_url, fut) = oidc.initiate_auth(["openid", "email"]);
-        let ws = ManagedWebSocket::new(ws, WS_PING_DELAY);
-
-        let Some(ws) = ws.send(auth_url.to_string()) else { return };
-        let mut ws = Some(ws);
-
-        let opt = select! {
-            opt = fut => { opt }
-            () = ManagedWebSocket::loop_recv(&mut ws, None) => { return }
-        };
-        let mut ws = ws.unwrap();
-
-        let Some(data) = opt else {
-            ws.close_frame(WebSocketCode::Ok, "Auth Failed");
-            return
-        };
-        let Some(email) = data.email else {
-            ws.close_frame(WebSocketCode::BadPayload, "Auth Failed");
-            return
-        };
-
-        match db.get_user_profile_by_email(&email).await {
-            Ok(Some(ref x)) => {
-                let Some(ws_tmp) = ws.send(serde_json::to_string(x).unwrap()) else { return };
-                let Some(ws_tmp) = ws_tmp.send(
-                    token_granter.create_token(LoginTokenData{
-                        email,
-                        username: x.username.clone()
-                    }).to_str().unwrap()
-                ) else { return };
-                ws = ws_tmp;
-            }
-            Ok(None) => {
-                let Some(ws_tmp) = ws.send("Sign Up") else { return };
-                ws = ws_tmp;
-                let mut profile;
-
-                loop {
-                    let Some((ws_tmp, msg)) = ws.recv().await else { return };
-                    ws = ws_tmp;
-
-                    let Message::Text(msg) = msg else {
-                        ws.close_frame(WebSocketCode::BadPayload, "Expected profile");
-                        return
-                    };
-
-                    let Ok(tmp_profile) = serde_json::from_str::<UserProfile>(&msg) else {
-                        ws.close_frame(WebSocketCode::BadPayload, "");
-                        return
-                    };
-                    profile = tmp_profile;
-
-                    if profile.username.is_inappropriate() {
-                        let Some(ws_tmp) = ws.send("Inappropriate username") else {
-                            return
-                        };
-                        ws = ws_tmp;
-                        continue;
-                    }
-
-                    match db.is_username_taken(&profile.username).await {
-                        Ok(true) => {
-                            let Some(ws_tmp) = ws.send("Username already used") else {
-                                return
-                            };
-                            ws = ws_tmp;
-                            continue;
-                        }
-                        Ok(false) => {}
-                        Err(e) => {
-                            error!(target: "login", "{:?}", e.context("checking if username is taken"));
-                            ws.close_frame(WebSocketCode::InternalError, "");
-                            return;
-                        }
-                    };
-
-                    break;
-                }
-
-                if let Err(e) = db.create_user_profile(
-                    email.clone(),
-                    profile.username.clone(),
-                    profile.tournament_wins
-                ).await {
-                    error!(target: "login", "{:?}", e.context("creating user profile"));
-                    ws.close_frame(WebSocketCode::InternalError, "");
-                    return;
-                }
-
-                if let Err(e) = leaderboard.add_easy_entry(email.clone(), LeaderboardEntry {
-                    score:profile.easy_highscore,
-                    username: profile.username.clone(),
-                }).await {
-                    let e = anyhow::Error::from(e);
-                    error!(target: "login", "{:?}", e.context(format!("adding easy entry for {email}")));
-                }
-                if let Err(e) = leaderboard.add_normal_entry(email.clone(), LeaderboardEntry {
-                    score:profile.normal_highscore,
-                    username: profile.username.clone(),
-                }).await {
-                    let e = anyhow::Error::from(e);
-                    error!(target: "login", "{:?}", e.context(format!("adding normal entry for {email}")));
-                }
-                if let Err(e) = leaderboard.add_expert_entry(email.clone(), LeaderboardEntry {
-                    score:profile.easy_highscore,
-                    username: profile.username.clone(),
-                }).await {
-                    let e = anyhow::Error::from(e);
-                    error!(target: "login", "{:?}", e.context(format!("adding easy entry for {email}")));
-                }
-
-                let Some(ws_tmp) = ws.send(
-                    token_granter.create_token(LoginTokenData {
-                        email,
-                        username: profile.username
-                    }).to_str().unwrap()
-                ) else { return };
-                ws = ws_tmp;
-            }
-            Err(e) => {
-                error!(target: "login", "{e:?}");
-                ws.close_frame(WebSocketCode::InternalError, "");
-                return;
-            }
-        };
-
-        ws.close_frame(WebSocketCode::Ok, "");
-    })
-}
-
-async fn quick_login(
-    token: VerifiedToken<LoginTokenGranter>,
-    State(db): State<DB>,
-) -> (StatusCode, String) {
-    match db.get_user_profile_by_email(token.item.email.clone()).await {
-        Ok(Some(ref x)) => (
-            StatusCode::OK,
-            serde_json::to_string(x).expect("Correct serialization of UserProfile"),
-        ),
-        Ok(None) => (StatusCode::BAD_REQUEST, "User does not exist".into()),
-        Err(e) => {
-            error!(target: "quick_login", "{e:?}");
-            (StatusCode::INTERNAL_SERVER_ERROR, String::new())
-        }
     }
 }
 
@@ -335,11 +174,8 @@ async fn main() -> anyhow::Result<()> {
         ["^/oidc/"],
         [
             ("/oidc/redirect", openid_redirect!()),
-            ("/login", get(login)),
-            ("/quick_login", get(quick_login)),
-            ("/highscore/easy", post(update_easy_highscore)),
-            ("/highscore/normal", post(update_normal_highscore)),
-            ("/highscore/expert", post(update_expert_highscore)),
+            ("/login", get(user_auth::login)),
+            ("/quick_login", get(user_auth::quick_login)),
             ("/leaderboard/easy", get(get_easy_leaderboard)),
             ("/leaderboard/normal", get(get_normal_leaderboard)),
             ("/leaderboard/expert", get(get_expert_leaderboard)),
