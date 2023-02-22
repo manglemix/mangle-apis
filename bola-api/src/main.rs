@@ -129,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
             success: "Success".into(),
         }),
         oidc_state,
-        login_tokens: LoginTokenGranter::new(Duration::from_secs(config.token_duration)),
+        login_tokens: Default::default(),
         leaderboard: Leaderboard::new(db.clone(), node, 5).await?,
         // node,
         db,

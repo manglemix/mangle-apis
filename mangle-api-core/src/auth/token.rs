@@ -1,4 +1,4 @@
-use std::{hash::Hash, sync::Arc, time::Duration};
+use std::{hash::Hash, sync::Arc};
 
 use axum::{
     async_trait,
@@ -8,84 +8,61 @@ use axum::{
 use bimap::BiMap;
 use parking_lot::Mutex;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
-use tokio::{
-    spawn,
-    sync::oneshot::{channel, Sender},
-    time::sleep,
-};
 
-struct TokenData<T> {
-    _sender: Sender<()>,
-    data: Arc<T>,
+
+pub struct TokenHandle<T: Send + Sync + Hash + Eq + 'static> {
+    pub token: Arc<HeaderValue>,
+    pub item: Arc<T>,
+    granter: Arc<TokenGranterImpl<T>>
 }
 
-impl<T: Hash> Hash for TokenData<T> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+impl<T: Send + Sync + Hash + Eq + 'static> Drop for TokenHandle<T> {
+    fn drop(&mut self) {
+        self.granter.tokens.lock().remove_by_left(&self.token);
     }
 }
 
-impl<T: PartialEq> PartialEq for TokenData<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.data == other.data
-    }
-}
-
-impl<T: Eq> Eq for TokenData<T> {}
 
 struct TokenGranterImpl<T: Send + Sync + Hash + Eq + 'static> {
     // When the sender gets dropped, the task responsible for expiring the token will complete
-    tokens: Mutex<BiMap<HeaderValue, TokenData<T>>>,
-    token_duration: Duration,
+    tokens: Mutex<BiMap<Arc<HeaderValue>, Arc<T>>>
 }
+
+impl<T: Send + Sync + Hash + Eq + 'static> Default for TokenGranterImpl<T> {
+    fn default() -> Self {
+        Self { tokens: Default::default() }
+    }
+}
+
 
 #[derive(Clone)]
 pub struct BasicTokenGranter<T: Send + Sync + Hash + Eq + 'static> {
     inner: Arc<TokenGranterImpl<T>>,
 }
 
-impl<T: Send + Sync + Hash + Eq + 'static> BasicTokenGranter<T> {
-    pub fn new(token_duration: Duration) -> Self {
-        Self {
-            inner: Arc::new(TokenGranterImpl {
-                tokens: Default::default(),
-                token_duration,
-            }),
-        }
+impl<T: Send + Sync + Hash + Eq + 'static> Default for BasicTokenGranter<T> {
+    fn default() -> Self {
+        Self { inner: Default::default() }
     }
+}
 
-    pub fn create_token<const N: u8>(&self, item: T) -> HeaderValue {
+
+impl<T: Send + Sync + Hash + Eq + 'static> BasicTokenGranter<T> {
+    pub fn create_token<const N: u8>(&self, item: T) -> TokenHandle<T> {
         let mut lock = self.inner.tokens.lock();
-        let (sender, receiver) = channel();
-        let token_data = TokenData {
-            _sender: sender,
-            data: Arc::new(item),
-        };
-        lock.remove_by_right(&token_data);
+        lock.remove_by_right(&item);
 
         let bytes: Vec<u8> = thread_rng()
             .sample_iter(&Alphanumeric)
             .take(N as usize)
             .collect();
 
-        let token = unsafe { HeaderValue::from_maybe_shared_unchecked(bytes) };
+        let token = Arc::new(unsafe { HeaderValue::from_maybe_shared_unchecked(bytes) });
 
-        lock.insert(token.clone(), token_data);
+        let item = Arc::new(item);
+        lock.insert(token.clone(), item.clone());
 
-        let token2 = token.clone();
-        let token_duration = self.inner.token_duration;
-        let inner = self.inner.clone();
-
-        spawn(async move {
-            tokio::select! {
-                () = sleep(token_duration) => {
-                    inner.tokens.lock().remove_by_left(&token2);
-                }
-                _ = receiver => { }
-            }
-        });
-
-        token
+        TokenHandle { token , granter: self.inner.clone(), item }
     }
 
     pub fn revoke_token(&self, token: &HeaderValue) -> Option<Arc<T>> {
@@ -95,7 +72,6 @@ impl<T: Send + Sync + Hash + Eq + 'static> BasicTokenGranter<T> {
             .remove_by_left(token)
             .unzip()
             .1
-            .map(|x| x.data)
     }
 
     pub fn verify_token(&self, token: &HeaderValue) -> Option<Arc<T>> {
@@ -103,16 +79,16 @@ impl<T: Send + Sync + Hash + Eq + 'static> BasicTokenGranter<T> {
             .tokens
             .lock()
             .get_by_left(token)
-            .map(|x| x.data.clone())
+            .cloned()
     }
 }
 
 pub trait HeaderTokenGranter {
-    type AssociatedDataType: Send + Sync + 'static;
+    type AssociatedDataType: Send + Eq + Hash + Sync + 'static;
     const TOKEN_LENGTH: u8;
     const HEADER_NAME: &'static str;
 
-    fn create_token(&self, item: Self::AssociatedDataType) -> HeaderValue;
+    fn create_token(&self, item: Self::AssociatedDataType) -> TokenHandle<Self::AssociatedDataType>;
 
     fn revoke_token(&self, token: &HeaderValue) -> Option<Arc<Self::AssociatedDataType>>;
 
@@ -130,7 +106,7 @@ macro_rules! create_header_token_granter {
             const TOKEN_LENGTH: u8 = $token_length;
             const HEADER_NAME: &'static str = $header_name;
 
-            fn create_token(&self, item: Self::AssociatedDataType) -> HeaderValue {
+            fn create_token(&self, item: Self::AssociatedDataType) -> $crate::auth::token::TokenHandle<Self::AssociatedDataType> {
                 self.0.create_token::<{Self::TOKEN_LENGTH}>(item)
             }
 
@@ -143,9 +119,9 @@ macro_rules! create_header_token_granter {
             }
         }
 
-        impl $name {
-            pub fn new(token_duration: std::time::Duration) -> Self {
-                Self($crate::auth::token::BasicTokenGranter::new(token_duration))
+        impl Default for $name {
+            fn default() -> Self {
+                Self(Default::default())
             }
         }
     };

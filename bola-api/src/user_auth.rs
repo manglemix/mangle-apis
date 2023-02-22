@@ -1,5 +1,5 @@
 use axum::{extract::{State, WebSocketUpgrade, ws::Message}, response::{Response}, http::StatusCode, body::BoxBody};
-use mangle_api_core::{auth::{token::{HeaderTokenGranter, VerifiedToken}}, ws::{ManagedWebSocket, WebSocketCode}, serde_json, log::error};
+use mangle_api_core::{auth::{token::{HeaderTokenGranter, VerifiedToken, TokenHandle}}, ws::{ManagedWebSocket, WebSocketCode}, serde_json, log::error};
 use rustrict::CensorStr;
 use serde::Deserialize;
 use tokio::select;
@@ -36,18 +36,18 @@ pub(crate) async fn login(
             return
         };
 
-        let username;
+        let token;
 
         match db.get_user_profile_by_email(&email).await {
             Ok(Some(profile)) => {
                 let Some(ws_tmp) = ws.send(serde_json::to_string(&profile).unwrap()) else { return };
-                username = profile.username;
+                token = globals.login_tokens.create_token(LoginTokenData{
+                    email: email.clone(),
+                    username: profile.username
+                });
 
                 let Some(ws_tmp) = ws_tmp.send(
-                    globals.login_tokens.create_token(LoginTokenData{
-                        email: email.clone(),
-                        username: username.clone()
-                    }).to_str().unwrap()
+                    token.token.to_str().unwrap()
                 ) else { return };
 
                 ws = ws_tmp;
@@ -99,11 +99,9 @@ pub(crate) async fn login(
                     break;
                 }
 
-                username = profile.username;
-
                 if let Err(e) = db.create_user_profile(
                     email.clone(),
-                    username.clone(),
+                    profile.username.clone(),
                     profile.tournament_wins
                 ).await {
                     error!(target: "login", "{:?}", e.context("creating user profile"));
@@ -115,31 +113,33 @@ pub(crate) async fn login(
 
                 if let Err(e) = leaderboard.add_easy_entry(email.clone(), LeaderboardEntry {
                     score: profile.easy_highscore,
-                    username: username.clone(),
+                    username: profile.username.clone(),
                 }).await {
                     let e = anyhow::Error::from(e);
                     error!(target: "login", "{:?}", e.context(format!("adding easy entry for {email}")));
                 }
                 if let Err(e) = leaderboard.add_normal_entry(email.clone(), LeaderboardEntry {
                     score: profile.normal_highscore,
-                    username: username.clone(),
+                    username: profile.username.clone(),
                 }).await {
                     let e = anyhow::Error::from(e);
                     error!(target: "login", "{:?}", e.context(format!("adding normal entry for {email}")));
                 }
                 if let Err(e) = leaderboard.add_expert_entry(email.clone(), LeaderboardEntry {
                     score: profile.easy_highscore,
-                    username: username.clone(),
+                    username: profile.username.clone(),
                 }).await {
                     let e = anyhow::Error::from(e);
                     error!(target: "login", "{:?}", e.context(format!("adding easy entry for {email}")));
                 }
 
+                token = globals.login_tokens.create_token(LoginTokenData {
+                    email,
+                    username: profile.username
+                });
+
                 let Some(ws_tmp) = ws.send(
-                    globals.login_tokens.create_token(LoginTokenData {
-                        email: email.clone(),
-                        username: username.clone()
-                    }).to_str().unwrap()
+                    token.token.to_str().unwrap()
                 ) else { return };
                 ws = ws_tmp;
             }
@@ -150,7 +150,7 @@ pub(crate) async fn login(
             }
         };
 
-        logged_in(globals, ws, email, username).await;
+        logged_in(globals, ws, token).await;
     })
 }
 
@@ -176,8 +176,9 @@ pub(crate) async fn quick_login(
 
     ws.on_upgrade(|ws| async move {
         let ws = ManagedWebSocket::new(ws, WS_PING_DELAY);
-        let Some(ws) = ws.send(user_profile) else { return };
-        logged_in(globals, ws, token.item.email.clone(), token.item.username.clone()).await;
+        let Some(_ws) = ws.send(user_profile) else { return };
+        todo!()
+        // logged_in(globals, ws, token).await;
     })
 }
 
@@ -199,9 +200,11 @@ enum MessageSet<'a> {
 async fn logged_in(
     GlobalState { leaderboard, .. }: GlobalState,
     mut ws: ManagedWebSocket,
-    email: String,
-    username: String
+    token: TokenHandle<LoginTokenData>
 ) {
+    let email = &token.item.email;
+    let username = &token.item.username;
+
     macro_rules! recv {
         () => {{
             let Some((tmp_ws, msg)) = ws.recv().await else { break };
