@@ -8,10 +8,9 @@ use axum::{
 };
 use derive_more::{Display, Error};
 use mangle_api_core::{
-    distributed::Node, log::error, parking_lot::RwLock, serde_json,
-    ws::ManagedWebSocket,
+    distributed::Node, log::error, parking_lot::RwLock, serde_json, ws::ManagedWebSocket,
 };
-use serde::{Serialize};
+use serde::Serialize;
 use tokio::{
     select, spawn,
     sync::broadcast::{channel, Sender},

@@ -1,16 +1,28 @@
-use axum::{extract::{State, WebSocketUpgrade, ws::Message}, response::{Response}, http::StatusCode, body::BoxBody};
-use mangle_api_core::{auth::{token::{HeaderTokenGranter, VerifiedToken, TokenHandle}}, ws::{ManagedWebSocket, WebSocketCode}, serde_json, log::error};
+use std::{sync::Arc, ops::Deref};
+
+use axum::{
+    body::BoxBody,
+    extract::{ws::Message, State, WebSocketUpgrade},
+    http::{StatusCode, HeaderValue},
+    response::Response,
+};
+use mangle_api_core::{
+    auth::token::{HeaderTokenGranter, VerifiedToken},
+    log::error,
+    serde_json,
+    ws::{ManagedWebSocket, WebSocketCode},
+};
 use rustrict::CensorStr;
 use serde::Deserialize;
 use tokio::select;
 
-use crate::{leaderboard::{LeaderboardEntry}, db::{UserProfile}, LoginTokenGranter, WS_PING_DELAY, LoginTokenData, GlobalState};
+use crate::{
+    db::UserProfile, leaderboard::LeaderboardEntry, GlobalState, LoginTokenData, LoginTokenGranter,
+    WS_PING_DELAY,
+};
 
 #[axum::debug_handler(state = GlobalState)]
-pub(crate) async fn login(
-    State(globals): State<GlobalState>,
-    ws: WebSocketUpgrade,
-) -> Response {
+pub(crate) async fn login(State(globals): State<GlobalState>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(|ws| async move {
         let db = &globals.db;
         let oidc = &globals.goidc.0;
@@ -37,17 +49,21 @@ pub(crate) async fn login(
         };
 
         let token;
+        let token_data;
 
         match db.get_user_profile_by_email(&email).await {
             Ok(Some(profile)) => {
                 let Some(ws_tmp) = ws.send(serde_json::to_string(&profile).unwrap()) else { return };
-                token = globals.login_tokens.create_token(LoginTokenData{
+                let (token_tmp, token_data_tmp) = globals.login_tokens.create_token(LoginTokenData{
                     email: email.clone(),
                     username: profile.username
                 });
 
+                token = token_tmp;
+                token_data = token_data_tmp;
+
                 let Some(ws_tmp) = ws_tmp.send(
-                    token.token.to_str().unwrap()
+                    token.to_str().unwrap()
                 ) else { return };
 
                 ws = ws_tmp;
@@ -133,13 +149,16 @@ pub(crate) async fn login(
                     error!(target: "login", "{:?}", e.context(format!("adding easy entry for {email}")));
                 }
 
-                token = globals.login_tokens.create_token(LoginTokenData {
+                let (token_tmp, token_data_tmp) = globals.login_tokens.create_token(LoginTokenData {
                     email,
                     username: profile.username
                 });
 
+                token = token_tmp;
+                token_data = token_data_tmp;
+
                 let Some(ws_tmp) = ws.send(
-                    token.token.to_str().unwrap()
+                    token.to_str().unwrap()
                 ) else { return };
                 ws = ws_tmp;
             }
@@ -150,60 +169,70 @@ pub(crate) async fn login(
             }
         };
 
-        logged_in(globals, ws, token).await;
+        logged_in(globals, ws, token, token_data).await;
     })
 }
 
 pub(crate) async fn quick_login(
     token: VerifiedToken<LoginTokenGranter>,
     State(globals): State<GlobalState>,
-    ws: WebSocketUpgrade
+    ws: WebSocketUpgrade,
 ) -> Response {
-    let user_profile = match globals.db.get_user_profile_by_email(token.item.email.clone()).await {
+    let user_profile = match globals
+        .db
+        .get_user_profile_by_email(token.item.email.clone())
+        .await
+    {
         Ok(Some(ref x)) => serde_json::to_string(x).expect("Correct serialization of UserProfile"),
-        Ok(None) => return Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(BoxBody::default())
-            .expect("Response to be valid"),
+        Ok(None) => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(BoxBody::default())
+                .expect("Response to be valid")
+        }
         Err(e) => {
             error!(target: "quick_login", "{e:?}");
             return Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(BoxBody::default())
-                .expect("Response to be valid")
+                .expect("Response to be valid");
         }
     };
 
     ws.on_upgrade(|ws| async move {
         let ws = ManagedWebSocket::new(ws, WS_PING_DELAY);
-        let Some(_ws) = ws.send(user_profile) else { return };
-        todo!()
-        // logged_in(globals, ws, token).await;
+        let Some(ws) = ws.send(user_profile) else { return };
+        logged_in(globals, ws, token.token, token.item).await;
     })
 }
 
-
+// #[derive(Deserialize, serde::Serialize)]
 #[derive(Deserialize)]
 struct ScoreUpdateRequest<'a> {
     difficulty: &'a str,
-    score: u16
+    score: u16,
 }
 
-
+// #[derive(Deserialize, serde::Serialize)]
 #[derive(Deserialize)]
 enum MessageSet<'a> {
     #[serde(borrow)]
-    ScoreUpdateRequest(ScoreUpdateRequest<'a>)
+    ScoreUpdateRequest(ScoreUpdateRequest<'a>),
+    Logout,
 }
 
-
 async fn logged_in(
-    GlobalState { leaderboard, .. }: GlobalState,
+    GlobalState {
+        leaderboard,
+        login_tokens,
+        ..
+    }: GlobalState,
     mut ws: ManagedWebSocket,
-    token: TokenHandle<LoginTokenData>
+    token: Arc<HeaderValue>,
+    token_data: Arc<LoginTokenData>,
 ) {
-    let email = &token.item.email;
-    let username = &token.item.username;
+    let email = &token_data.email;
+    let username = &token_data.username;
 
     macro_rules! recv {
         () => {{
@@ -230,39 +259,56 @@ async fn logged_in(
         match msg {
             MessageSet::ScoreUpdateRequest(req) => {
                 let res = match req.difficulty {
-                    "easy" => leaderboard.add_easy_entry(
-                        email.clone(),
-                        LeaderboardEntry {
-                            score: req.score,
-                            username: username.clone()
-                        }
-                    ).await,
-                    "normal" => leaderboard.add_normal_entry(
-                        email.clone(),
-                        LeaderboardEntry {
-                            score: req.score,
-                            username: username.clone()
-                        }
-                    ).await,
-                    "expert" => leaderboard.add_expert_entry(
-                        email.clone(),
-                        LeaderboardEntry {
-                            score: req.score,
-                            username: username.clone()
-                        }
-                    ).await,
+                    "easy" => {
+                        leaderboard
+                            .add_easy_entry(
+                                email.clone(),
+                                LeaderboardEntry {
+                                    score: req.score,
+                                    username: username.clone(),
+                                },
+                            )
+                            .await
+                    }
+                    "normal" => {
+                        leaderboard
+                            .add_normal_entry(
+                                email.clone(),
+                                LeaderboardEntry {
+                                    score: req.score,
+                                    username: username.clone(),
+                                },
+                            )
+                            .await
+                    }
+                    "expert" => {
+                        leaderboard
+                            .add_expert_entry(
+                                email.clone(),
+                                LeaderboardEntry {
+                                    score: req.score,
+                                    username: username.clone(),
+                                },
+                            )
+                            .await
+                    }
                     _ => {
                         send!("Not a valid difficulty");
-                        continue
+                        continue;
                     }
                 };
 
                 if let Err(_e) = res {
                     send!("Internal Error");
-                    continue
+                    continue;
                 }
 
                 send!("Success");
+            }
+            MessageSet::Logout => {
+                login_tokens.revoke_token(token.deref());
+                ws.close_frame(WebSocketCode::Ok, "Logout Successful");
+                return;
             }
         }
     }

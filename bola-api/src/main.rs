@@ -4,12 +4,8 @@ use std::{net::ToSocketAddrs, time::Duration};
 
 // use aws_config::{SdkConfig};
 use anyhow::{self, Context};
-use axum::{
-    extract::{FromRef},
-    http::{HeaderValue},
-    routing::{get},
-};
-use db::{DB};
+use axum::{extract::FromRef, http::HeaderValue, routing::get};
+use db::DB;
 use leaderboard::{
     get_easy_leaderboard, get_expert_leaderboard, get_normal_leaderboard, Leaderboard,
 };
@@ -23,9 +19,7 @@ use mangle_api_core::{
     },
     create_header_token_granter,
     distributed::Node,
-    get_pipe_name,
-    make_app, openid_redirect, pre_matches, start_api,
-    BaseConfig, BindAddress,
+    get_pipe_name, make_app, openid_redirect, pre_matches, start_api, BaseConfig, BindAddress,
 };
 use tokio::{self};
 
@@ -47,7 +41,7 @@ struct LoginTokenData {
 
 create_header_token_granter!( LoginTokenGranter "Login-Token" 32 LoginTokenData);
 
-#[derive(Clone)]
+#[derive(Clone, FromRef)]
 struct GlobalState {
     db: DB,
     oidc_state: OIDCState,
@@ -56,42 +50,6 @@ struct GlobalState {
     login_tokens: LoginTokenGranter,
     // node: Node<NetworkMessage>,
     leaderboard: Leaderboard,
-}
-
-impl FromRef<GlobalState> for LoginTokenGranter {
-    fn from_ref(input: &GlobalState) -> Self {
-        input.login_tokens.clone()
-    }
-}
-
-impl FromRef<GlobalState> for DB {
-    fn from_ref(input: &GlobalState) -> Self {
-        input.db.clone()
-    }
-}
-
-impl FromRef<GlobalState> for GoogleOIDC {
-    fn from_ref(input: &GlobalState) -> Self {
-        input.goidc.clone()
-    }
-}
-
-impl FromRef<GlobalState> for AuthPages {
-    fn from_ref(input: &GlobalState) -> Self {
-        input.auth_pages.clone()
-    }
-}
-
-impl FromRef<GlobalState> for OIDCState {
-    fn from_ref(input: &GlobalState) -> Self {
-        input.oidc_state.clone()
-    }
-}
-
-impl FromRef<GlobalState> for Leaderboard {
-    fn from_ref(input: &GlobalState) -> Self {
-        input.leaderboard.clone()
-    }
 }
 
 #[tokio::main]
@@ -129,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
             success: "Success".into(),
         }),
         oidc_state,
-        login_tokens: Default::default(),
+        login_tokens: LoginTokenGranter::new(Duration::from_secs(config.token_duration)),
         leaderboard: Leaderboard::new(db.clone(), node, 5).await?,
         // node,
         db,
