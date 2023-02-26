@@ -6,7 +6,7 @@ use axum::{
 use mangle_api_core::{
     auth::token::{HeaderTokenGranter, VerifiedToken, TokenVerificationError},
     log::{error, warn},
-    neo_api::APIMessage,
+    neo_api::{APIMessage},
     serde_json,
     ws::{ManagedWebSocket, WebSocketCode},
 };
@@ -22,6 +22,16 @@ pub struct FirstConnectionState {
     globals: GlobalState,
     token: Option<VerifiedToken<LoginTokenGranter>>,
 }
+
+
+// impl ClientIdentifier for FirstConnectionState {
+//     type ClientID = Arc<LoginTokenData>;
+
+//     fn get_client_identifier(&self) -> Self::ClientID {
+//         self.token.
+//     }
+// }
+
 
 pub struct SessionState {
     globals: GlobalState,

@@ -1,13 +1,11 @@
-use std::{collections::HashSet, net::{SocketAddr, IpAddr}, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     async_trait,
-    extract::{ws::Message, ConnectInfo, FromRef, FromRequest, WebSocketUpgrade, FromRequestParts},
-    response::{Response, IntoResponse},
+    extract::{ws::Message, FromRef, FromRequest, WebSocketUpgrade, State},
+    response::{Response},
     routing::MethodRouter,
 };
-use hyper::{StatusCode, Request};
-use parking_lot::Mutex;
 
 use crate::ws::ManagedWebSocket;
 
@@ -28,21 +26,21 @@ pub trait APIMessage: Sized + Send + Sync + TryFrom<String, Error = String> + 's
 }
 
 struct APIConnectionManagerImpl {
-    connections: Mutex<HashSet<IpAddr>>,
+    // connections: Mutex<HashSet<T>>,
     ping_delay: Duration,
 }
 
 
-struct ClientConnection {
-    client_addr: IpAddr,
-    inner: Arc<APIConnectionManagerImpl>
-}
+// struct ClientConnection<T: Hash + Eq + PartialEq> {
+//     conn_ident: T,
+//     inner: Arc<APIConnectionManagerImpl<T>>
+// }
 
-impl Drop for ClientConnection {
-    fn drop(&mut self) {
-        self.inner.connections.lock().remove(&self.client_addr);
-    }
-}
+// impl<T: Hash + Eq + PartialEq> Drop for ClientConnection<T> {
+//     fn drop(&mut self) {
+//         self.inner.connections.lock().remove(&self.conn_ident);
+//     }
+// }
 
 
 #[derive(Clone)]
@@ -50,11 +48,12 @@ pub struct APIConnectionManager {
     inner: Arc<APIConnectionManagerImpl>,
 }
 
-impl APIConnectionManager {
+impl APIConnectionManager
+{
     pub fn new(ping_delay: Duration) -> Self {
         Self {
             inner: Arc::new(APIConnectionManagerImpl {
-                connections: Default::default(),
+                // connections: Default::default(),
                 ping_delay,
             }),
         }
@@ -63,7 +62,6 @@ impl APIConnectionManager {
     fn init_connection<FirstConnectionState, SessionState, M>(
         &self,
         ws: WebSocketUpgrade,
-        client_conn: ClientConnection,
         session_state: FirstConnectionState,
     ) -> Response
     where
@@ -71,10 +69,22 @@ impl APIConnectionManager {
         SessionState: Send + Sync + 'static,
         M: APIMessage<SessionState = SessionState, FirstConnectionState = FirstConnectionState>,
     {
+        // let client_id = session_state.get_client_identifier();
+        // {
+        //     let mut lock = self.inner.connections.lock();
+        //     if lock.contains(&client_id) {
+        //         return (StatusCode::CONFLICT, "Already connected").into_response()
+        //     }
+        //     lock.insert(client_id.clone());
+        // }
+
         let inner = self.inner.clone();
 
         ws.on_upgrade(|ws| async move {
-            let _client_conn = client_conn;
+            // let _client_conn = ClientConnection {
+            //     conn_ident: client_id,
+            //     inner: inner.clone(),
+            // };
             let mut ws = ManagedWebSocket::new(ws, inner.ping_delay);
             macro_rules! unwrap_ws {
                 ($ws: expr) => {
@@ -119,60 +129,18 @@ impl APIConnectionManager {
 }
 
 
-struct WSAPIRequest<S> {
-    upgrade: WebSocketUpgrade,
-    conn_manager: APIConnectionManager,
-    client_conn: ClientConnection,
-    session_state: S
-}
+// pub trait ClientIdentifier {
+//     type ClientID: Hash + Eq + PartialEq + Clone + Send + Sync + 'static;
 
-
-#[async_trait]
-impl<S, State, B> FromRequest<State, B> for WSAPIRequest<S>
-where
-    APIConnectionManager: FromRef<State>,
-    S: FromRequest<State, B>,
-    State: Send + Sync + 'static,
-    B: Send + Sync + 'static
-{
-    type Rejection = Response;
-
-    async fn from_request(req: Request<B>, state: &State) -> Result<Self, Self::Rejection> {
-        let (mut parts, body) = req.into_parts();
-        let connect_info: ConnectInfo<SocketAddr> = ConnectInfo::from_request_parts(&mut parts, state)
-            .await.
-            map_err(IntoResponse::into_response)?;
-        
-        let client_addr = connect_info.0.ip();
-        let conn_manager = APIConnectionManager::from_ref(state);
-        {
-            let mut lock = conn_manager.inner.connections.lock();
-            if lock.contains(&client_addr) {
-                return Err((StatusCode::CONFLICT, "Already connected").into_response());
-            }
-            lock.insert(client_addr);
-        }
-        Ok(Self {
-            upgrade: WebSocketUpgrade::from_request_parts(&mut parts, state)
-                .await
-                .map_err(IntoResponse::into_response)?,
-
-            session_state: S::from_request(Request::from_parts(parts, body), state)
-                .await
-                .map_err(IntoResponse::into_response)?,
-
-            client_conn: ClientConnection {
-                client_addr,
-                inner: conn_manager.inner.clone()
-            },
-            conn_manager
-        })
-    }
-}
+//     fn get_client_identifier(&self) -> Option<Self::ClientID>;
+// }
 
 
 async fn ws_api_route_internal<FirstConnectionState, SessionState, M, S, B>(
-    WSAPIRequest { upgrade, client_conn, session_state, conn_manager }: WSAPIRequest<FirstConnectionState>
+    // WSAPIRequest { upgrade, client_conn, session_state, conn_manager }: WSAPIRequest<FirstConnectionState>
+    upgrade: WebSocketUpgrade,
+    State(conn_manager): State<APIConnectionManager>,
+    session_state: FirstConnectionState
 ) -> Response
 where
     FirstConnectionState: FromRequest<S, B> + Send + Sync + 'static,
@@ -182,9 +150,9 @@ where
     B: Send + Sync + axum::body::HttpBody + 'static,
     APIConnectionManager: FromRef<S>,
 {
+
     conn_manager.init_connection::<FirstConnectionState, SessionState, M>(
         upgrade,
-        client_conn,
         session_state,
     )
 }
