@@ -33,6 +33,8 @@ pub struct Config {
     pub token_duration: u64,
     #[serde(default = "Default::default")]
     pub sibling_domains: HashMap<String, SocketAddr>,
+    // #[serde(default = "ping_delay")]
+    // pub ping_delay: Duration,
 }
 
 // impl BaseConfig for Config {
@@ -116,3 +118,7 @@ fn token_duration() -> u64 {
 fn network_port() -> u16 {
     10419
 }
+
+// fn ping_delay() -> Duration {
+//     Duration::from_secs(45)
+// }

@@ -3,7 +3,7 @@ use std::{hash::Hash, sync::Arc, time::Duration};
 use axum::{
     async_trait,
     extract::{FromRef, FromRequestParts},
-    http::{request::Parts, HeaderValue, StatusCode},
+    http::{request::Parts, HeaderValue, StatusCode}, response::IntoResponse,
 };
 use bimap::BiMap;
 use parking_lot::Mutex;
@@ -102,7 +102,7 @@ impl<T: Send + Sync + Hash + Eq + 'static> BasicTokenGranter<T> {
     }
 }
 
-pub trait HeaderTokenGranter {
+pub trait HeaderTokenGranter: Sized {
     type AssociatedDataType: Send + Eq + Hash + Sync + 'static;
     const TOKEN_LENGTH: u8;
     const HEADER_NAME: &'static str;
@@ -110,7 +110,7 @@ pub trait HeaderTokenGranter {
     fn create_token(
         &self,
         item: Self::AssociatedDataType,
-    ) -> (Arc<HeaderValue>, Arc<Self::AssociatedDataType>);
+    ) -> VerifiedToken<Self>;
 
     fn revoke_token(&self, token: &HeaderValue) -> Option<Arc<Self::AssociatedDataType>>;
 
@@ -131,8 +131,8 @@ macro_rules! create_header_token_granter {
             const TOKEN_LENGTH: u8 = $token_length;
             const HEADER_NAME: &'static str = $header_name;
 
-            fn create_token(&self, item: Self::AssociatedDataType) -> (std::sync::Arc<axum::http::HeaderValue>, std::sync::Arc<Self::AssociatedDataType>) {
-                self.0.create_token::<{Self::TOKEN_LENGTH}>(item)
+            fn create_token(&self, item: Self::AssociatedDataType) -> $crate::auth::token::VerifiedToken<Self> {
+                self.0.create_token::<{Self::TOKEN_LENGTH}>(item).into()
             }
 
             fn revoke_token(&self, token: &HeaderValue) -> Option<std::sync::Arc<Self::AssociatedDataType>> {
@@ -161,41 +161,77 @@ use tokio::{
 
 pub struct VerifiedToken<TG: HeaderTokenGranter> {
     pub token: Arc<HeaderValue>,
-    pub item: Arc<TG::AssociatedDataType>,
-    granter: TG,
+    pub item: Arc<TG::AssociatedDataType>
 }
 
 impl<TG: HeaderTokenGranter> VerifiedToken<TG> {
-    pub fn revoke_token(self) {
-        self.granter.revoke_token(&self.token);
+    pub fn revoke_token(self, granter: TG) {
+        granter.revoke_token(&self.token);
     }
 }
 
+impl<TG: HeaderTokenGranter> From<(Arc<HeaderValue>, Arc<TG::AssociatedDataType>)> for VerifiedToken<TG> {
+    fn from((token, item): (Arc<HeaderValue>, Arc<TG::AssociatedDataType>)) -> Self {
+        Self {
+            token,
+            item
+        }
+    }
+}
+
+
+pub enum TokenVerificationError {
+    MissingToken,
+    InvalidTokenLength,
+    InvalidToken
+}
+
+
+impl IntoResponse for TokenVerificationError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            TokenVerificationError::MissingToken => (StatusCode::UNAUTHORIZED, "Missing token"),
+            TokenVerificationError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid or expired token"),
+            TokenVerificationError::InvalidTokenLength => (StatusCode::UNAUTHORIZED, "Invalid length for token"),
+            
+        }.into_response()
+    }
+}
+
+
 #[async_trait]
 impl<S: Sync, TG: HeaderTokenGranter + FromRef<S>> FromRequestParts<S> for VerifiedToken<TG> {
-    type Rejection = (StatusCode, String);
+    type Rejection = TokenVerificationError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        macro_rules! verify {
+            ($token: expr) => {
+                let granter = TG::from_ref(state);
+                return if let Some((token, item)) = granter.verify_token($token) {
+                    Ok(Self {
+                        token,
+                        item,
+                    })
+                } else {
+                    Err(TokenVerificationError::InvalidToken)
+                }
+            };
+        }
         if let Some(token) = parts.headers.get(TG::HEADER_NAME) {
             if token.len() != TG::TOKEN_LENGTH as usize {
-                return Err((StatusCode::BAD_REQUEST, "Invalid length for token".into()));
+                return Err(TokenVerificationError::InvalidTokenLength);
             }
+            verify!(token);
 
-            let granter = TG::from_ref(state);
-            if let Some((token, item)) = granter.verify_token(token) {
-                Ok(Self {
-                    token,
-                    item,
-                    granter,
-                })
-            } else {
-                Err((StatusCode::UNAUTHORIZED, "Invalid or expired token".into()))
-            }
-        } else {
-            Err((
-                StatusCode::BAD_REQUEST,
-                format!("Missing header: {}", TG::HEADER_NAME),
-            ))
         }
+        if let Some(query) = parts.uri.query() {
+            if let Some(idx) = query.find(&TG::HEADER_NAME.to_lowercase()) {
+                if let Some(token) = query.get((idx+12)..(idx+12+TG::TOKEN_LENGTH as usize)) {
+                    verify!(&HeaderValue::from_str(token).unwrap());
+                }
+            }
+        }
+
+        Err(TokenVerificationError::MissingToken)
     }
 }

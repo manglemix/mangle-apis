@@ -1,5 +1,6 @@
 #![feature(string_leak)]
 
+use axum::extract::connect_info::Connected;
 use axum::http::HeaderValue;
 use axum::routing::MethodRouter;
 use axum::{Router, Server};
@@ -7,6 +8,7 @@ use axum::{Router, Server};
 pub mod auth;
 // pub mod sync;
 pub mod distributed;
+pub mod neo_api;
 pub mod ws;
 
 #[cfg(any(feature = "redis"))]
@@ -16,6 +18,7 @@ use anyhow::{Context, Error, Result};
 use clap::builder::IntoResettable;
 use clap::{arg, Command};
 use derive_more::From;
+use hyper::server::conn::AddrStream;
 use mangle_detached_console::{send_message, ConsoleSendError};
 
 use fern::{log_file, Dispatch};
@@ -187,7 +190,7 @@ pub async fn pre_matches<Config: DeserializeOwned>(
         .map(Option::Some)
 }
 
-pub async fn start_api<State, const N1: usize, const N2: usize, A, B, C>(
+pub async fn start_api<State, const N1: usize, const N2: usize, A, B, C, ConnectInfo>(
     state: State,
     app: Command,
     pipe_name: OsString,
@@ -200,6 +203,7 @@ where
     A: Into<AllowMethods>,
     B: Into<AllowOrigin>,
     C: Into<BindAddress>,
+    ConnectInfo: for<'a> Connected<&'a AddrStream>
 {
     // Setup logger
     static CRITICAL_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
@@ -393,7 +397,7 @@ where
     macro_rules! run {
         ($server: expr, $addr: expr) => {
             let server = $server
-                .serve(router.into_make_service())
+                .serve(router.into_make_service_with_connect_info::<ConnectInfo>())
                 .with_graceful_shutdown(fut);
 
             info!("Binded to {:?}", $addr);

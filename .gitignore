@@ -3,4 +3,3 @@
 .idea/
 /mangle-apis.code-workspace
 docker_build_env/persistent/
-mangle-api-core/Cargo.lock

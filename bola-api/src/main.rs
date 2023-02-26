@@ -1,6 +1,7 @@
 #![feature(trivial_bounds)]
+#![feature(string_leak)]
 
-use std::{net::ToSocketAddrs, time::Duration};
+use std::{net::{ToSocketAddrs, SocketAddr}, time::Duration};
 
 // use aws_config::{SdkConfig};
 use anyhow::{self, Context};
@@ -19,7 +20,9 @@ use mangle_api_core::{
     },
     create_header_token_granter,
     distributed::Node,
-    get_pipe_name, make_app, openid_redirect, pre_matches, start_api, BaseConfig, BindAddress,
+    get_pipe_name, make_app,
+    neo_api::{ws_api_route, APIConnectionManager},
+    openid_redirect, pre_matches, start_api, BaseConfig, BindAddress,
 };
 use tokio::{self};
 
@@ -29,15 +32,16 @@ mod leaderboard;
 mod network;
 mod user_auth;
 
-const WS_PING_DELAY: Duration = Duration::from_secs(45);
-
 use config::Config;
+use user_auth::{FirstConnectionState, SessionState, WSAPIMessage};
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct LoginTokenData {
     username: String,
     email: String,
 }
+
+const WS_PING_DELAY: Duration = Duration::from_secs(45);
 
 create_header_token_granter!( LoginTokenGranter "Login-Token" 32 LoginTokenData);
 
@@ -50,6 +54,7 @@ struct GlobalState {
     login_tokens: LoginTokenGranter,
     // node: Node<NetworkMessage>,
     leaderboard: Leaderboard,
+    api_conn_manager: APIConnectionManager,
 }
 
 #[tokio::main]
@@ -91,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
         leaderboard: Leaderboard::new(db.clone(), node, 5).await?,
         // node,
         db,
+        api_conn_manager: APIConnectionManager::new(WS_PING_DELAY),
     };
 
     let config = BaseConfig {
@@ -124,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
-    start_api(
+    start_api::<_, 1, 5, _, _, _, SocketAddr>(
         state,
         app,
         pipe_name,
@@ -132,8 +138,12 @@ async fn main() -> anyhow::Result<()> {
         ["^/oidc/"],
         [
             ("/oidc/redirect", openid_redirect!()),
-            ("/login", get(user_auth::login)),
-            ("/quick_login", get(user_auth::quick_login)),
+            (
+                "/ws_api",
+                ws_api_route::<FirstConnectionState, SessionState, WSAPIMessage, _, _>(),
+            ),
+            // ("/login", get(user_auth::login)),
+            // ("/quick_login", get(user_auth::quick_login)),
             ("/leaderboard/easy", get(get_easy_leaderboard)),
             ("/leaderboard/normal", get(get_normal_leaderboard)),
             ("/leaderboard/expert", get(get_expert_leaderboard)),

@@ -1,14 +1,12 @@
-use std::{ops::Deref, sync::Arc};
-
 use axum::{
-    body::BoxBody,
-    extract::{ws::Message, State, WebSocketUpgrade},
-    http::{HeaderValue, StatusCode},
-    response::Response,
+    async_trait,
+    extract::{ws::Message, FromRequest, FromRequestParts},
+    http::{Request},
 };
 use mangle_api_core::{
-    auth::token::{HeaderTokenGranter, VerifiedToken},
+    auth::token::{HeaderTokenGranter, VerifiedToken, TokenVerificationError},
     log::{error, warn},
+    neo_api::APIMessage,
     serde_json,
     ws::{ManagedWebSocket, WebSocketCode},
 };
@@ -18,192 +16,40 @@ use tokio::select;
 
 use crate::{
     db::UserProfile, leaderboard::LeaderboardEntry, GlobalState, LoginTokenData, LoginTokenGranter,
-    WS_PING_DELAY,
 };
 
-#[axum::debug_handler(state = GlobalState)]
-pub(crate) async fn login(State(globals): State<GlobalState>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(|ws| async move {
-        let db = &globals.db;
-        let oidc = &globals.goidc.0;
-
-        let (auth_url, fut) = oidc.initiate_auth(["openid", "email"]);
-        let ws = ManagedWebSocket::new(ws, WS_PING_DELAY);
-
-        let Some(ws) = ws.send(auth_url.to_string()) else { return };
-        let mut ws = Some(ws);
-
-        let opt = select! {
-            opt = fut => { opt }
-            () = ManagedWebSocket::loop_recv(&mut ws, None) => { return }
-        };
-        let mut ws = ws.unwrap();
-
-        let Some(data) = opt else {
-            ws.close_frame(WebSocketCode::Ok, "Auth Failed");
-            return
-        };
-        let Some(email) = data.email else {
-            ws.close_frame(WebSocketCode::BadPayload, "Auth Failed");
-            return
-        };
-
-        let token;
-        let token_data;
-
-        match db.get_user_profile_by_email(&email).await {
-            Ok(Some(profile)) => {
-                let Some(ws_tmp) = ws.send(serde_json::to_string(&profile).unwrap()) else { return };
-                let (token_tmp, token_data_tmp) = globals.login_tokens.create_token(LoginTokenData{
-                    email: email.clone(),
-                    username: profile.username
-                });
-
-                token = token_tmp;
-                token_data = token_data_tmp;
-
-                let Some(ws_tmp) = ws_tmp.send(
-                    token.to_str().unwrap()
-                ) else { return };
-
-                ws = ws_tmp;
-            }
-            Ok(None) => {
-                let Some(ws_tmp) = ws.send("Sign Up") else { return };
-                ws = ws_tmp;
-                let mut profile;
-
-                loop {
-                    let Some((ws_tmp, msg)) = ws.recv().await else { return };
-                    ws = ws_tmp;
-
-                    let Message::Text(msg) = msg else {
-                        ws.close_frame(WebSocketCode::BadPayload, "Expected profile");
-                        return
-                    };
-
-                    let Ok(tmp_profile) = serde_json::from_str::<UserProfile>(&msg) else {
-                        ws.close_frame(WebSocketCode::BadPayload, "");
-                        return
-                    };
-                    profile = tmp_profile;
-
-                    if profile.username.is_inappropriate() {
-                        let Some(ws_tmp) = ws.send("Inappropriate username") else {
-                            return
-                        };
-                        ws = ws_tmp;
-                        continue;
-                    }
-
-                    match db.is_username_taken(&profile.username).await {
-                        Ok(true) => {
-                            let Some(ws_tmp) = ws.send("Username already used") else {
-                                return
-                            };
-                            ws = ws_tmp;
-                            continue;
-                        }
-                        Ok(false) => {}
-                        Err(e) => {
-                            error!(target: "login", "{:?}", e.context("checking if username is taken"));
-                            ws.close_frame(WebSocketCode::InternalError, "");
-                            return;
-                        }
-                    };
-
-                    break;
-                }
-
-                if let Err(e) = db.create_user_profile(
-                    email.clone(),
-                    profile.username.clone(),
-                    profile.tournament_wins
-                ).await {
-                    error!(target: "login", "{:?}", e.context("creating user profile"));
-                    ws.close_frame(WebSocketCode::InternalError, "");
-                    return;
-                }
-
-                let leaderboard = &globals.leaderboard;
-
-                if let Err(e) = leaderboard.add_easy_entry(email.clone(), LeaderboardEntry {
-                    score: profile.easy_highscore,
-                    username: profile.username.clone(),
-                }).await {
-                    let e = anyhow::Error::from(e);
-                    error!(target: "login", "{:?}", e.context(format!("adding easy entry for {email}")));
-                }
-                if let Err(e) = leaderboard.add_normal_entry(email.clone(), LeaderboardEntry {
-                    score: profile.normal_highscore,
-                    username: profile.username.clone(),
-                }).await {
-                    let e = anyhow::Error::from(e);
-                    error!(target: "login", "{:?}", e.context(format!("adding normal entry for {email}")));
-                }
-                if let Err(e) = leaderboard.add_expert_entry(email.clone(), LeaderboardEntry {
-                    score: profile.easy_highscore,
-                    username: profile.username.clone(),
-                }).await {
-                    let e = anyhow::Error::from(e);
-                    error!(target: "login", "{:?}", e.context(format!("adding easy entry for {email}")));
-                }
-
-                let (token_tmp, token_data_tmp) = globals.login_tokens.create_token(LoginTokenData {
-                    email,
-                    username: profile.username
-                });
-
-                token = token_tmp;
-                token_data = token_data_tmp;
-
-                let Some(ws_tmp) = ws.send(
-                    token.to_str().unwrap()
-                ) else { return };
-                ws = ws_tmp;
-            }
-            Err(e) => {
-                error!(target: "login", "{e:?}");
-                ws.close_frame(WebSocketCode::InternalError, "");
-                return;
-            }
-        };
-
-        logged_in(globals, ws, token, token_data).await;
-    })
+pub struct FirstConnectionState {
+    globals: GlobalState,
+    token: Option<VerifiedToken<LoginTokenGranter>>,
 }
 
-pub(crate) async fn quick_login(
-    token: VerifiedToken<LoginTokenGranter>,
-    State(globals): State<GlobalState>,
-    ws: WebSocketUpgrade,
-) -> Response {
-    let user_profile = match globals
-        .db
-        .get_user_profile_by_email(token.item.email.clone())
-        .await
-    {
-        Ok(Some(ref x)) => serde_json::to_string(x).expect("Correct serialization of UserProfile"),
-        Ok(None) => {
-            return Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(BoxBody::default())
-                .expect("Response to be valid")
-        }
-        Err(e) => {
-            error!(target: "quick_login", "{e:?}");
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(BoxBody::default())
-                .expect("Response to be valid");
-        }
-    };
+pub struct SessionState {
+    globals: GlobalState,
+    token: VerifiedToken<LoginTokenGranter>
+}
 
-    ws.on_upgrade(|ws| async move {
-        let ws = ManagedWebSocket::new(ws, WS_PING_DELAY);
-        let Some(ws) = ws.send(user_profile) else { return };
-        logged_in(globals, ws, token.token, token.item).await;
-    })
+#[async_trait]
+impl<B> FromRequest<GlobalState, B> for FirstConnectionState
+where
+    B: Send + Sync + 'static,
+{
+    type Rejection = TokenVerificationError;
+
+    async fn from_request(req: Request<B>, state: &GlobalState) -> Result<Self, Self::Rejection> {
+        let (mut parts, _) = req.into_parts();
+        let token = match VerifiedToken::<LoginTokenGranter>::from_request_parts(&mut parts, state)
+            .await
+        {
+            Ok(token) => Some(token),
+            Err(TokenVerificationError::MissingToken) => None,
+            Err(e) => return Err(e)
+        };
+
+        Ok(Self {
+            globals: state.clone(),
+            token,
+        })
+    }
 }
 
 // #[derive(Deserialize, serde::Serialize)]
@@ -215,59 +61,81 @@ struct ScoreUpdateRequest<'a> {
 
 // #[derive(Deserialize, serde::Serialize)]
 #[derive(Deserialize)]
-enum MessageSet<'a> {
+enum WSAPIMessageImpl<'a> {
     #[serde(borrow)]
     ScoreUpdateRequest(ScoreUpdateRequest<'a>),
     Logout,
 }
 
-async fn logged_in(
-    GlobalState {
-        leaderboard,
-        login_tokens,
-        ..
-    }: GlobalState,
-    mut ws: ManagedWebSocket,
-    token: Arc<HeaderValue>,
-    token_data: Arc<LoginTokenData>,
-) {
-    let email = &token_data.email;
-    let username = &token_data.username;
+pub struct WSAPIMessage {
+    _data: Box<str>,
+    msg: WSAPIMessageImpl<'static>,
+}
 
-    macro_rules! recv {
-        () => {{
-            let Some((tmp_ws, msg)) = ws.recv().await else { break };
-            ws = tmp_ws;
-            msg
-        }};
+impl TryFrom<String> for WSAPIMessage {
+    type Error = String;
+
+    fn try_from(mut value: String) -> Result<Self, Self::Error> {
+        value.shrink_to_fit();
+        let data_ref = value.leak();
+        let data = unsafe { Box::from_raw(data_ref) };
+
+        Ok(Self {
+            _data: data,
+            msg: serde_json::from_str(data_ref).map_err(|_| "Bad Request")?,
+        })
     }
-    macro_rules! send {
-        ($msg: expr) => {{
-            let Some(tmp_ws) = ws.send($msg) else { break };
-            ws = tmp_ws;
-        }};
+}
+
+#[async_trait]
+impl APIMessage for WSAPIMessage {
+    type FirstConnectionState = FirstConnectionState;
+    type SessionState = SessionState;
+
+    async fn on_connection(
+        session_state: FirstConnectionState,
+        mut ws: ManagedWebSocket,
+    ) -> Option<(ManagedWebSocket, SessionState)> {
+        if let Some(token) = session_state.token {
+            let profile = match session_state.globals.db.get_user_profile_by_email(&token.item.email).await {
+                Ok(Some(profile)) => profile,
+                Ok(None) => {
+                    warn!("Got valid session token without associated account: {}", token.item.email);
+                    ws.close_frame(WebSocketCode::BadPayload, "User does not exist");
+                    return None;
+                }
+                Err(e) => {
+                    error!(target: "login", "Faced the following error while getting user profile for {}: {e:?}", token.item.email);
+                    ws.close_frame(WebSocketCode::InternalError, "");
+                    return None;
+                }
+            };
+            
+            ws = ws.send(serde_json::to_string(&profile).unwrap())?;
+
+            Some((
+                ws,
+                SessionState {
+                    globals: session_state.globals,
+                    token
+                },
+            ))
+        } else {
+            login(session_state, ws).await
+        }
     }
-    loop {
-        #[cfg(not(debug_assertions))]
-        let Message::Text(msg) = recv!() else {
-            send!("Only text");
-            continue;
-        };
-        #[cfg(debug_assertions)]
-        let msg = match recv!() {
-            Message::Text(x) => x,
-            x => {
-                warn!("Received unexpected message: {x:?}");
-                send!("Only text");
-                continue;
-            }
-        };
-        let Ok(msg) = serde_json::from_str::<MessageSet>(&msg) else {
-            send!("Bad Request");
-            continue;
-        };
-        match msg {
-            MessageSet::ScoreUpdateRequest(req) => {
+
+    async fn route(
+        self,
+        session_state: &mut Self::SessionState,
+        ws: ManagedWebSocket,
+    ) -> Option<ManagedWebSocket> {
+        let leaderboard = &session_state.globals.leaderboard;
+        let email = &session_state.token.item.email;
+        let username = &session_state.token.item.username;
+
+        match self.msg {
+            WSAPIMessageImpl::ScoreUpdateRequest(req) => {
                 let res = match req.difficulty {
                     "easy" => {
                         leaderboard
@@ -302,24 +170,182 @@ async fn logged_in(
                             )
                             .await
                     }
-                    _ => {
-                        send!("Not a valid difficulty");
-                        continue;
-                    }
+                    _ => return ws.send("Not a valid difficulty"),
                 };
 
                 if let Err(_e) = res {
-                    send!("Internal Error");
-                    continue;
+                    return ws.send("Internal Error");
                 }
 
-                send!("Success");
+                ws.send("Success!")
             }
-            MessageSet::Logout => {
-                login_tokens.revoke_token(token.deref());
-                ws.close_frame(WebSocketCode::Ok, "Logout Successful");
-                return;
+            WSAPIMessageImpl::Logout => {
+                session_state.globals.login_tokens.revoke_token(&session_state.token.token);
+                ws.close_frame(WebSocketCode::Ok, "Successfully logged out");
+                None
             }
         }
     }
+}
+
+async fn login(
+    session_state: FirstConnectionState,
+    mut ws: ManagedWebSocket,
+) -> Option<(ManagedWebSocket, SessionState)> {
+    let globals = &session_state.globals;
+    let db = &globals.db;
+    let oidc = &globals.goidc.0;
+
+    let (auth_url, fut) = oidc.initiate_auth(["openid", "email"]);
+
+    ws = ws.send(auth_url.to_string())?;
+    let mut ws = Some(ws);
+
+    let opt = select! {
+        opt = fut => { opt }
+        () = ManagedWebSocket::loop_recv(&mut ws, None) => { return None }
+    };
+    let mut ws = ws.unwrap();
+
+    let Some(data) = opt else {
+        ws.close_frame(WebSocketCode::Ok, "Auth Failed");
+        return None
+    };
+    let Some(email) = data.email else {
+        ws.close_frame(WebSocketCode::BadPayload, "Auth Failed");
+        return None
+    };
+
+    let new_session_state;
+
+    match db.get_user_profile_by_email(&email).await {
+        Ok(Some(profile)) => {
+            ws = ws.send(serde_json::to_string(&profile).unwrap())?;
+            let token = globals.login_tokens.create_token(LoginTokenData {
+                email,
+                username: profile.username,
+            });
+
+            ws = ws.send(token.token.to_str().unwrap())?;
+
+            new_session_state = SessionState {
+                globals: session_state.globals,
+                token
+            };
+        }
+        Ok(None) => {
+            ws = ws.send("Sign Up")?;
+            let mut profile;
+
+            loop {
+                let (ws_tmp, msg) = ws.recv().await?;
+                ws = ws_tmp;
+
+                let Message::Text(msg) = msg else {
+                    ws.close_frame(WebSocketCode::BadPayload, "Expected profile");
+                    return None
+                };
+
+                let Ok(tmp_profile) = serde_json::from_str::<UserProfile>(&msg) else {
+                    ws.close_frame(WebSocketCode::BadPayload, "");
+                    return None
+                };
+                profile = tmp_profile;
+
+                if profile.username.is_inappropriate() {
+                    ws = ws.send("Inappropriate username")?;
+                    continue;
+                }
+
+                match db.is_username_taken(&profile.username).await {
+                    Ok(true) => {
+                        ws = ws.send("Username already used")?;
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        error!(target: "login", "{:?}", e.context("checking if username is taken"));
+                        ws.close_frame(WebSocketCode::InternalError, "");
+                        return None;
+                    }
+                };
+
+                break;
+            }
+
+            if let Err(e) = db
+                .create_user_profile(
+                    email.clone(),
+                    profile.username.clone(),
+                    profile.tournament_wins,
+                )
+                .await
+            {
+                error!(target: "login", "{:?}", e.context("creating user profile"));
+                ws.close_frame(WebSocketCode::InternalError, "");
+                return None;
+            }
+
+            let leaderboard = &globals.leaderboard;
+
+            if let Err(e) = leaderboard
+                .add_easy_entry(
+                    email.clone(),
+                    LeaderboardEntry {
+                        score: profile.easy_highscore,
+                        username: profile.username.clone(),
+                    },
+                )
+                .await
+            {
+                let e = anyhow::Error::from(e);
+                error!(target: "login", "{:?}", e.context(format!("adding easy entry for {email}")));
+            }
+            if let Err(e) = leaderboard
+                .add_normal_entry(
+                    email.clone(),
+                    LeaderboardEntry {
+                        score: profile.normal_highscore,
+                        username: profile.username.clone(),
+                    },
+                )
+                .await
+            {
+                let e = anyhow::Error::from(e);
+                error!(target: "login", "{:?}", e.context(format!("adding normal entry for {email}")));
+            }
+            if let Err(e) = leaderboard
+                .add_expert_entry(
+                    email.clone(),
+                    LeaderboardEntry {
+                        score: profile.easy_highscore,
+                        username: profile.username.clone(),
+                    },
+                )
+                .await
+            {
+                let e = anyhow::Error::from(e);
+                error!(target: "login", "{:?}", e.context(format!("adding easy entry for {email}")));
+            }
+
+            let token = globals.login_tokens.create_token(LoginTokenData {
+                email,
+                username: profile.username,
+            });
+
+            ws = ws.send(token.token.to_str().unwrap())?;
+
+            new_session_state = SessionState {
+                globals: session_state.globals,
+                token
+            };
+        }
+        Err(e) => {
+            error!(target: "login", "Faced the following error while getting user profile for {}: {e:?}", email);
+            ws.close_frame(WebSocketCode::InternalError, "");
+            return None;
+        }
+    };
+
+    Some((ws, new_session_state))
 }
