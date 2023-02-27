@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
             .context("parsing server_address and server_port")?,
         stderr_log_path: config.stderr_log,
         routing_log_path: config.routing_log,
-        suspicious_security_log_path: config.suspicious_security_log,
+        security_log_path: config.security_log,
         cors_allowed_methods: {
             let mut out = Vec::new();
 

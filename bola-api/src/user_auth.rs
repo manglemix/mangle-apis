@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use axum::{
     async_trait,
-    extract::{ws::Message, FromRequest, FromRequestParts},
-    http::Request,
+    extract::{ws::Message, FromRef, FromRequest, FromRequestParts},
+    http::{Request, StatusCode},
+    response::{IntoResponse, Response},
 };
 use mangle_api_core::{
     auth::token::{TokenVerificationError, VerifiedToken},
     log::{error, warn},
-    neo_api::{APIMessage, ConnectionLock},
+    neo_api::{APIConnectionManager, APIMessage, ConnectionLock},
     serde_json,
     ws::{ManagedWebSocket, WebSocketCode},
 };
@@ -24,7 +25,7 @@ use crate::{
 use std::ops::Deref;
 pub struct FirstConnectionState {
     globals: GlobalState,
-    login_token: Option<VerifiedToken<LoginTokenConfig>>,
+    logged_in: Option<LoggedIn>,
 }
 
 struct LoggedIn {
@@ -42,20 +43,30 @@ impl<B> FromRequest<GlobalState, B> for FirstConnectionState
 where
     B: Send + Sync + 'static,
 {
-    type Rejection = TokenVerificationError;
+    type Rejection = Response;
 
     async fn from_request(req: Request<B>, state: &GlobalState) -> Result<Self, Self::Rejection> {
         let (mut parts, _) = req.into_parts();
-        let login_token =
+        let logged_in =
             match VerifiedToken::<LoginTokenConfig>::from_request_parts(&mut parts, state).await {
-                Ok(token) => Some(token),
+                Ok(login_token) => Some(LoggedIn {
+                    _conn_lock: {
+                        let conn_manager = APIConnectionManager::from_ref(state);
+                        conn_manager
+                            .get_connection_lock(Arc::new(login_token.item.email.clone()))
+                            .map_err(|_| {
+                                (StatusCode::CONFLICT, "Already Connected").into_response()
+                            })
+                    }?,
+                    login_token,
+                }),
                 Err(TokenVerificationError::MissingToken) => None,
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into_response()),
             };
 
         Ok(Self {
             globals: state.clone(),
-            login_token,
+            logged_in,
         })
     }
 }
@@ -104,57 +115,37 @@ impl APIMessage for WSAPIMessage {
         session_state: FirstConnectionState,
         mut ws: ManagedWebSocket,
     ) -> Option<(ManagedWebSocket, SessionState)> {
-        let logged_in = if let Some(login_token) = session_state.login_token {
-            let Ok(conn_lock) = session_state
-                .globals
-                .api_conn_manager
-                .get_connection_lock(
-                    Arc::new(login_token
-                        .item
-                        .email
-                        .clone()))
-                else {
-                    ws.close_frame(WebSocketCode::BadPayload, "Already Connected");
-                    return None
-                };
-
+        if let Some(logged_in) = &session_state.logged_in {
             let profile = match session_state
                 .globals
                 .db
-                .get_user_profile_by_email(&login_token.item.email)
+                .get_user_profile_by_email(&logged_in.login_token.item.email)
                 .await
             {
                 Ok(Some(profile)) => profile,
                 Ok(None) => {
                     warn!(
                         "Got valid session token without associated account: {}",
-                        login_token.item.email
+                        logged_in.login_token.item.email
                     );
                     ws.close_frame(WebSocketCode::BadPayload, "User does not exist");
                     return None;
                 }
                 Err(e) => {
-                    error!(target: "login", "Faced the following error while getting user profile for {}: {e:?}", login_token.item.email);
+                    error!(target: "login", "Faced the following error while getting user profile for {}: {e:?}", logged_in.login_token.item.email);
                     ws.close_frame(WebSocketCode::InternalError, "");
                     return None;
                 }
             };
 
             ws = ws.send(serde_json::to_string(&profile).unwrap())?;
-
-            Some(LoggedIn {
-                _conn_lock: conn_lock,
-                login_token,
-            })
-        } else {
-            None
-        };
+        }
 
         Some((
             ws,
             SessionState {
                 globals: session_state.globals,
-                logged_in,
+                logged_in: session_state.logged_in,
             },
         ))
     }
@@ -169,8 +160,8 @@ impl APIMessage for WSAPIMessage {
         macro_rules! check_login {
             () => {{
                 let Some(LoggedIn { login_token, .. }) = &session_state.logged_in else {
-                                                        return ws.send("Not logged in")
-                                                    };
+                                                                    return ws.send("Not logged in")
+                                                                };
                 login_token
             }};
         }

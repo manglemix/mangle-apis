@@ -53,7 +53,7 @@ pub use toml;
 pub use tower_http;
 
 mod log_targets {
-    pub const SUSPICIOUS_SECURITY: &str = "suspicious_security";
+    pub const SECURITY: &str = "suspicious_security";
 }
 
 pub fn make_app<const N: usize>(
@@ -100,7 +100,7 @@ pub enum BindAddress {
 pub struct BaseConfig<A: Into<AllowMethods>, B: Into<AllowOrigin>, C: Into<BindAddress>> {
     pub stderr_log_path: String,
     pub routing_log_path: String,
-    pub suspicious_security_log_path: String,
+    pub security_log_path: String,
     pub cors_allowed_methods: A,
     pub cors_allowed_origins: B,
     pub api_token: HeaderValue,
@@ -207,8 +207,8 @@ where
 {
     // Setup logger
     static CRITICAL_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
-    static STDERR_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Trace);
-    static ROUTING_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Trace);
+    static STDERR_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
+    static ROUTING_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
 
     const ROUTING_REGEX_RAW: &str = "^(tower_http::trace|hyper::proto|mio|tracing)";
 
@@ -217,7 +217,7 @@ where
     let non_stderr = Arc::new(
         RegexSet::new([
             ROUTING_REGEX_RAW.to_string(),
-            format!("^{}", log_targets::SUSPICIOUS_SECURITY),
+            format!("^{}", log_targets::SECURITY),
         ])
         .unwrap(),
     );
@@ -275,14 +275,10 @@ where
         // Suspicious security to file (maybe more?)
         .chain(
             Dispatch::new()
-                .filter(|metadata| {
-                    metadata
-                        .target()
-                        .starts_with(log_targets::SUSPICIOUS_SECURITY)
-                })
+                .filter(|metadata| metadata.target().starts_with(log_targets::SECURITY))
                 .chain(
-                    log_file(&config.suspicious_security_log_path)
-                        .context(format!("Opening {:?}", config.suspicious_security_log_path))?,
+                    log_file(&config.security_log_path)
+                        .context(format!("Opening {:?}", config.security_log_path))?,
                 ),
         )
         .apply()?;
