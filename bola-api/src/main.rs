@@ -31,10 +31,10 @@ mod config;
 mod db;
 mod leaderboard;
 mod network;
-mod user_auth;
+mod ws_api;
 
 use config::Config;
-use user_auth::{FirstConnectionState, SessionState, WSAPIMessage};
+use ws_api::{FirstConnectionState, SessionState, WSAPIMessage};
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct LoginTokenData {

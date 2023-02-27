@@ -412,7 +412,7 @@ async fn login(
                 .await
             {
                 let e = anyhow::Error::from(e);
-                error!(target: "login", "{:?}", e.context(format!("adding easy entry for {email}")));
+                error!(target: "login", "{:?}", e.context(format!("adding expert entry for {email}")));
             }
 
             let login_token = globals.login_tokens.create_token(LoginTokenData {
