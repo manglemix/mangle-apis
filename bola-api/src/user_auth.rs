@@ -24,14 +24,17 @@ use crate::{
 use std::ops::Deref;
 pub struct FirstConnectionState {
     globals: GlobalState,
-    token: Option<VerifiedToken<LoginTokenConfig>>,
+    login_token: Option<VerifiedToken<LoginTokenConfig>>,
 }
 
-// TODO Optional logged in
+struct LoggedIn {
+    login_token: VerifiedToken<LoginTokenConfig>,
+    _conn_lock: ConnectionLock<Arc<String>>,
+}
+
 pub struct SessionState {
     globals: GlobalState,
-    token: VerifiedToken<LoginTokenConfig>,
-    _conn_lock: ConnectionLock<Arc<String>>,
+    logged_in: Option<LoggedIn>,
 }
 
 #[async_trait]
@@ -43,7 +46,7 @@ where
 
     async fn from_request(req: Request<B>, state: &GlobalState) -> Result<Self, Self::Rejection> {
         let (mut parts, _) = req.into_parts();
-        let token =
+        let login_token =
             match VerifiedToken::<LoginTokenConfig>::from_request_parts(&mut parts, state).await {
                 Ok(token) => Some(token),
                 Err(TokenVerificationError::MissingToken) => None,
@@ -52,7 +55,7 @@ where
 
         Ok(Self {
             globals: state.clone(),
-            token,
+            login_token,
         })
     }
 }
@@ -69,6 +72,7 @@ enum WSAPIMessageImpl<'a> {
         #[serde(borrow)]
         difficulty: &'a str,
     },
+    Login,
 }
 
 pub struct WSAPIMessage {
@@ -100,12 +104,12 @@ impl APIMessage for WSAPIMessage {
         session_state: FirstConnectionState,
         mut ws: ManagedWebSocket,
     ) -> Option<(ManagedWebSocket, SessionState)> {
-        if let Some(token) = session_state.token {
+        let logged_in = if let Some(login_token) = session_state.login_token {
             let Ok(conn_lock) = session_state
                 .globals
                 .api_conn_manager
                 .get_connection_lock(
-                    Arc::new(token
+                    Arc::new(login_token
                         .item
                         .email
                         .clone()))
@@ -117,20 +121,20 @@ impl APIMessage for WSAPIMessage {
             let profile = match session_state
                 .globals
                 .db
-                .get_user_profile_by_email(&token.item.email)
+                .get_user_profile_by_email(&login_token.item.email)
                 .await
             {
                 Ok(Some(profile)) => profile,
                 Ok(None) => {
                     warn!(
                         "Got valid session token without associated account: {}",
-                        token.item.email
+                        login_token.item.email
                     );
                     ws.close_frame(WebSocketCode::BadPayload, "User does not exist");
                     return None;
                 }
                 Err(e) => {
-                    error!(target: "login", "Faced the following error while getting user profile for {}: {e:?}", token.item.email);
+                    error!(target: "login", "Faced the following error while getting user profile for {}: {e:?}", login_token.item.email);
                     ws.close_frame(WebSocketCode::InternalError, "");
                     return None;
                 }
@@ -138,17 +142,21 @@ impl APIMessage for WSAPIMessage {
 
             ws = ws.send(serde_json::to_string(&profile).unwrap())?;
 
-            Some((
-                ws,
-                SessionState {
-                    globals: session_state.globals,
-                    token,
-                    _conn_lock: conn_lock,
-                },
-            ))
+            Some(LoggedIn {
+                _conn_lock: conn_lock,
+                login_token,
+            })
         } else {
-            login(session_state, ws).await
-        }
+            None
+        };
+
+        Some((
+            ws,
+            SessionState {
+                globals: session_state.globals,
+                logged_in,
+            },
+        ))
     }
 
     async fn route(
@@ -157,11 +165,22 @@ impl APIMessage for WSAPIMessage {
         ws: ManagedWebSocket,
     ) -> Option<ManagedWebSocket> {
         let leaderboard = &session_state.globals.leaderboard;
-        let email = &session_state.token.item.email;
-        let username = &session_state.token.item.username;
+
+        macro_rules! check_login {
+            () => {{
+                let Some(LoggedIn { login_token, .. }) = &session_state.logged_in else {
+                                                        return ws.send("Not logged in")
+                                                    };
+                login_token
+            }};
+        }
 
         match self.msg {
             WSAPIMessageImpl::ScoreUpdateRequest { difficulty, score } => {
+                let login_token = check_login!();
+                let email = &login_token.item.email;
+                let username = &login_token.item.username;
+
                 let res = match difficulty {
                     "easy" => {
                         leaderboard
@@ -206,10 +225,11 @@ impl APIMessage for WSAPIMessage {
                 ws.send("Success!")
             }
             WSAPIMessageImpl::Logout => {
+                let login_token = check_login!();
                 session_state
                     .globals
                     .login_tokens
-                    .revoke_token(&session_state.token.token);
+                    .revoke_token(&login_token.token);
                 ws.close_frame(WebSocketCode::Ok, "Successfully logged out");
                 None
             }
@@ -251,14 +271,15 @@ impl APIMessage for WSAPIMessage {
                     _ => ws.send("Not a valid difficulty"),
                 }
             }
+            WSAPIMessageImpl::Login => login(session_state, ws).await,
         }
     }
 }
 
 async fn login(
-    session_state: FirstConnectionState,
+    session_state: &mut SessionState,
     mut ws: ManagedWebSocket,
-) -> Option<(ManagedWebSocket, SessionState)> {
+) -> Option<ManagedWebSocket> {
     let globals = &session_state.globals;
     let db = &globals.db;
     let oidc = &globals.goidc.0;
@@ -266,15 +287,18 @@ async fn login(
     let (auth_url, fut) = oidc.initiate_auth(["openid", "email"]);
 
     ws = ws.send(auth_url.to_string())?;
-    let mut ws = Some(ws);
+    let mut opt_ws = Some(ws);
 
-    let opt = select! {
+    let auth_option = select! {
         opt = fut => { opt }
-        () = ManagedWebSocket::loop_recv(&mut ws, None) => { return None }
+        opt = ManagedWebSocket::option_recv(&mut opt_ws) => {
+            opt.as_ref()?;  // Return if None
+            return opt_ws.unwrap().send("Login Cancelled")
+        }
     };
-    let mut ws = ws.unwrap();
+    ws = opt_ws.unwrap();
 
-    let Some(data) = opt else {
+    let Some(data) = auth_option else {
         ws.close_frame(WebSocketCode::Ok, "Auth Failed");
         return None
     };
@@ -290,23 +314,20 @@ async fn login(
         return None
     };
 
-    let new_session_state;
-
     match db.get_user_profile_by_email(&email).await {
         Ok(Some(profile)) => {
             ws = ws.send(serde_json::to_string(&profile).unwrap())?;
-            let token = globals.login_tokens.create_token(LoginTokenData {
+            let login_token = globals.login_tokens.create_token(LoginTokenData {
                 email,
                 username: profile.username,
             });
 
-            ws = ws.send(token.token.to_str().unwrap())?;
+            ws = ws.send(login_token.token.to_str().unwrap())?;
 
-            new_session_state = SessionState {
-                globals: session_state.globals,
-                token,
+            session_state.logged_in = Some(LoggedIn {
+                login_token,
                 _conn_lock: conn_lock,
-            };
+            });
         }
         Ok(None) => {
             ws = ws.send("Sign Up")?;
@@ -403,18 +424,17 @@ async fn login(
                 error!(target: "login", "{:?}", e.context(format!("adding easy entry for {email}")));
             }
 
-            let token = globals.login_tokens.create_token(LoginTokenData {
+            let login_token = globals.login_tokens.create_token(LoginTokenData {
                 email,
                 username: profile.username,
             });
 
-            ws = ws.send(token.token.to_str().unwrap())?;
+            ws = ws.send(login_token.token.to_str().unwrap())?;
 
-            new_session_state = SessionState {
-                globals: session_state.globals,
-                token,
+            session_state.logged_in = Some(LoggedIn {
+                login_token,
                 _conn_lock: conn_lock,
-            };
+            });
         }
         Err(e) => {
             error!(target: "login", "Faced the following error while getting user profile for {}: {e:?}", email);
@@ -423,5 +443,5 @@ async fn login(
         }
     };
 
-    Some((ws, new_session_state))
+    Some(ws)
 }

@@ -1,25 +1,18 @@
-use std::{ops::Deref, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
 use aws_sdk_dynamodb::model::{AttributeAction, AttributeValue, AttributeValueUpdate};
-use axum::{
-    extract::{State, WebSocketUpgrade},
-    response::Response,
-};
 use derive_more::{Display, Error};
-use mangle_api_core::{
-    distributed::Node, log::error, parking_lot::RwLock, serde_json, ws::ManagedWebSocket,
-};
+use mangle_api_core::{distributed::Node, log::error, parking_lot::RwLock};
 use serde::Serialize;
 use tokio::{
-    select, spawn,
+    spawn,
     sync::broadcast::{channel, Sender},
 };
 
 use crate::{
     db::DB,
     network::{HighscoreUpdate, NetworkMessage},
-    WS_PING_DELAY,
 };
 
 const LEADERBOARD_UPDATE_BUFFER_SIZE: usize = 8;
@@ -352,71 +345,4 @@ impl Leaderboard {
             .await
             .ok()
     }
-}
-
-macro_rules! get_leaderboard {
-    ($ws: expr, $leaderboard: expr, $get_fn: ident, $wait_fn: ident) => {
-        $ws.on_upgrade(|ws| async move {
-            let ws = ManagedWebSocket::new(ws, WS_PING_DELAY);
-            let leaderboard = $leaderboard.$get_fn();
-            let mut ws =
-                ws.send(serde_json::to_string(&leaderboard).expect("leaderboard to serialize"));
-
-            if ws.is_none() {
-                return;
-            }
-
-            loop {
-                select! {
-                    () = ManagedWebSocket::loop_recv(&mut ws, None) => {
-                        break
-                    }
-                    opt = $leaderboard.$wait_fn() => {
-                        if let Some(LeaderboardUpdate{ leaderboard }) = opt {
-                            ws = ws.unwrap().send(
-                                serde_json::to_string(leaderboard.deref())
-                                    .expect("leaderboard to serialize")
-                            );
-                        } else {
-                            break
-                        }
-                    }
-                }
-            }
-        })
-    };
-}
-
-#[axum::debug_handler]
-pub(crate) async fn get_easy_leaderboard(
-    State(leaderboard): State<Leaderboard>,
-    ws: WebSocketUpgrade,
-) -> Response {
-    get_leaderboard!(ws, leaderboard, get_easy_leaderboard, wait_for_easy_update)
-}
-
-#[axum::debug_handler]
-pub(crate) async fn get_normal_leaderboard(
-    State(leaderboard): State<Leaderboard>,
-    ws: WebSocketUpgrade,
-) -> Response {
-    get_leaderboard!(
-        ws,
-        leaderboard,
-        get_normal_leaderboard,
-        wait_for_normal_update
-    )
-}
-
-#[axum::debug_handler]
-pub(crate) async fn get_expert_leaderboard(
-    State(leaderboard): State<Leaderboard>,
-    ws: WebSocketUpgrade,
-) -> Response {
-    get_leaderboard!(
-        ws,
-        leaderboard,
-        get_expert_leaderboard,
-        wait_for_expert_update
-    )
 }

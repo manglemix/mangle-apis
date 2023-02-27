@@ -8,11 +8,9 @@ use std::{
 };
 
 use anyhow::{self, Context};
-use axum::{extract::FromRef, http::HeaderValue, routing::get};
+use axum::{extract::FromRef, http::HeaderValue};
 use db::DB;
-use leaderboard::{
-    get_easy_leaderboard, get_expert_leaderboard, get_normal_leaderboard, Leaderboard,
-};
+use leaderboard::Leaderboard;
 use mangle_api_core::{
     auth::{
         auth_pages::{AuthPages, AuthPagesSrc},
@@ -144,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
-    start_api::<_, 1, 5, _, _, _, SocketAddr>(
+    start_api::<_, 1, 2, _, _, _, SocketAddr>(
         state,
         app,
         pipe_name,
@@ -156,9 +154,6 @@ async fn main() -> anyhow::Result<()> {
                 "/ws_api",
                 ws_api_route::<FirstConnectionState, SessionState, WSAPIMessage, _, _, _>(),
             ),
-            ("/leaderboard/easy", get(get_easy_leaderboard)),
-            ("/leaderboard/normal", get(get_normal_leaderboard)),
-            ("/leaderboard/expert", get(get_expert_leaderboard)),
         ],
     )
     .await
