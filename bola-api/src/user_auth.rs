@@ -17,14 +17,17 @@ use serde::Deserialize;
 use tokio::select;
 
 use crate::{
-    db::UserProfile, leaderboard::LeaderboardEntry, GlobalState, LoginTokenConfig, LoginTokenData,
+    db::UserProfile,
+    leaderboard::{LeaderboardEntry, LeaderboardUpdate},
+    GlobalState, LoginTokenConfig, LoginTokenData,
 };
-
+use std::ops::Deref;
 pub struct FirstConnectionState {
     globals: GlobalState,
     token: Option<VerifiedToken<LoginTokenConfig>>,
 }
 
+// TODO Optional logged in
 pub struct SessionState {
     globals: GlobalState,
     token: VerifiedToken<LoginTokenConfig>,
@@ -55,16 +58,17 @@ where
 }
 
 #[derive(Deserialize)]
-struct ScoreUpdateRequest<'a> {
-    difficulty: &'a str,
-    score: u16,
-}
-
-#[derive(Deserialize)]
 enum WSAPIMessageImpl<'a> {
-    #[serde(borrow)]
-    ScoreUpdateRequest(ScoreUpdateRequest<'a>),
+    ScoreUpdateRequest {
+        #[serde(borrow)]
+        difficulty: &'a str,
+        score: u16,
+    },
     Logout,
+    GetLeaderboard {
+        #[serde(borrow)]
+        difficulty: &'a str,
+    },
 }
 
 pub struct WSAPIMessage {
@@ -157,14 +161,14 @@ impl APIMessage for WSAPIMessage {
         let username = &session_state.token.item.username;
 
         match self.msg {
-            WSAPIMessageImpl::ScoreUpdateRequest(req) => {
-                let res = match req.difficulty {
+            WSAPIMessageImpl::ScoreUpdateRequest { difficulty, score } => {
+                let res = match difficulty {
                     "easy" => {
                         leaderboard
                             .add_easy_entry(
                                 email.clone(),
                                 LeaderboardEntry {
-                                    score: req.score,
+                                    score,
                                     username: username.clone(),
                                 },
                             )
@@ -175,7 +179,7 @@ impl APIMessage for WSAPIMessage {
                             .add_normal_entry(
                                 email.clone(),
                                 LeaderboardEntry {
-                                    score: req.score,
+                                    score,
                                     username: username.clone(),
                                 },
                             )
@@ -186,7 +190,7 @@ impl APIMessage for WSAPIMessage {
                             .add_expert_entry(
                                 email.clone(),
                                 LeaderboardEntry {
-                                    score: req.score,
+                                    score,
                                     username: username.clone(),
                                 },
                             )
@@ -208,6 +212,44 @@ impl APIMessage for WSAPIMessage {
                     .revoke_token(&session_state.token.token);
                 ws.close_frame(WebSocketCode::Ok, "Successfully logged out");
                 None
+            }
+            WSAPIMessageImpl::GetLeaderboard { difficulty } => {
+                let leaderboard = &session_state.globals.leaderboard;
+
+                macro_rules! leaderboard {
+                    ($first_fn: ident, $second_fn: ident) => {{
+                        let mut opt_ws = ws.send(serde_json::to_string(
+                            &leaderboard.$first_fn()
+                        ).unwrap());
+
+                        loop {
+                            select! {
+                                opt = ManagedWebSocket::option_recv(&mut opt_ws) => {
+                                    opt.as_ref()?;  // Return if None
+                                    break opt_ws.unwrap().send("Unsubscribed")
+                                }
+                                opt = leaderboard.$second_fn() => {
+                                    if let Some(LeaderboardUpdate{ leaderboard }) = opt {
+                                        opt_ws = Some(opt_ws.unwrap().send(
+                                            serde_json::to_string(leaderboard.deref())
+                                                .expect("leaderboard to serialize")
+                                        )?);
+                                    } else {
+                                        opt_ws.unwrap().close_frame(WebSocketCode::InternalError, "Leaderboard Closed");
+                                        break None
+                                    }
+                                }
+                            }
+                        }
+                    }};
+                }
+
+                match difficulty {
+                    "easy" => leaderboard!(get_easy_leaderboard, wait_for_easy_update),
+                    "normal" => leaderboard!(get_normal_leaderboard, wait_for_normal_update),
+                    "expert" => leaderboard!(get_expert_leaderboard, wait_for_expert_update),
+                    _ => ws.send("Not a valid difficulty"),
+                }
             }
         }
     }

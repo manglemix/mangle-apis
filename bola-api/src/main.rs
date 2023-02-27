@@ -18,14 +18,14 @@ use mangle_api_core::{
         auth_pages::{AuthPages, AuthPagesSrc},
         openid::{
             google::{new_google_oidc_from_file, GoogleOIDC},
-            OIDCState,
+            openid_redirect, OIDCState,
         },
         token::{HeaderTokenGranterConfig, TokenGranter, TokenGranterConfig},
     },
     distributed::Node,
     get_pipe_name, make_app,
     neo_api::{ws_api_route, APIConnectionManager},
-    openid_redirect, pre_matches, start_api, BaseConfig, BindAddress,
+    pre_matches, start_api, BaseConfig, BindAddress,
 };
 use tokio::{self};
 
@@ -151,13 +151,11 @@ async fn main() -> anyhow::Result<()> {
         config,
         ["^/oidc/"],
         [
-            ("/oidc/redirect", openid_redirect!()),
+            ("/oidc/redirect", openid_redirect()),
             (
                 "/ws_api",
                 ws_api_route::<FirstConnectionState, SessionState, WSAPIMessage, _, _, _>(),
             ),
-            // ("/login", get(user_auth::login)),
-            // ("/quick_login", get(user_auth::quick_login)),
             ("/leaderboard/easy", get(get_easy_leaderboard)),
             ("/leaderboard/normal", get(get_normal_leaderboard)),
             ("/leaderboard/expert", get(get_expert_leaderboard)),

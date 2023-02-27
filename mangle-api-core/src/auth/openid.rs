@@ -1,8 +1,10 @@
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use axum::{
-    extract::{Query, State},
+    body::HttpBody,
+    extract::{FromRef, Query, State},
     response::Html,
+    routing::MethodRouter,
 };
 use log::error;
 use openid::{error::ClientError, DiscoveredClient, Options};
@@ -206,14 +208,16 @@ pub async fn oidc_redirect_handler(
     oauth_state.verify_auth(code, state, pages).await
 }
 
-#[macro_export]
-macro_rules! openid_redirect {
-    () => {
-        axum::routing::get($crate::auth::openid::oidc_redirect_handler)
-    };
+pub fn openid_redirect<S, B>() -> MethodRouter<S, B>
+where
+    AuthPages: FromRef<S>,
+    OIDCState: FromRef<S>,
+    S: Send + Sync + Clone + 'static,
+    B: Send + Sync + HttpBody + 'static, // AuthPages: FromRef<S>
+{
+    axum::routing::get(oidc_redirect_handler)
 }
 
-pub use openid_redirect;
 use serde::Deserialize;
 use tokio::{
     sync::oneshot::{channel, Sender},

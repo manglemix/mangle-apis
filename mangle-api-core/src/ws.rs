@@ -106,6 +106,14 @@ impl ManagedWebSocket {
         self.msg_receiver.recv().await.map(move |msg| (self, msg))
     }
 
+    pub async fn option_recv(ws: &mut Option<Self>) -> Option<Message> {
+        let opt = ws.as_mut()?.msg_receiver.recv().await;
+        if opt.is_none() {
+            *ws = None;
+        }
+        opt
+    }
+
     /// Repeeatedly collects Messages from the other end of the WebSocket until an error occurs.
     ///
     /// If the WebSocket faced an error, the given `ws` Option will be set to None.
