@@ -203,7 +203,7 @@ where
     A: Into<AllowMethods>,
     B: Into<AllowOrigin>,
     C: Into<BindAddress>,
-    ConnectInfo: for<'a> Connected<&'a AddrStream>
+    ConnectInfo: for<'a> Connected<&'a AddrStream>,
 {
     // Setup logger
     static CRITICAL_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);

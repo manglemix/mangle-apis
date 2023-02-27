@@ -1,12 +1,14 @@
+use std::sync::Arc;
+
 use axum::{
     async_trait,
     extract::{ws::Message, FromRequest, FromRequestParts},
-    http::{Request},
+    http::Request,
 };
 use mangle_api_core::{
-    auth::token::{HeaderTokenGranter, VerifiedToken, TokenVerificationError},
+    auth::token::{TokenVerificationError, VerifiedToken},
     log::{error, warn},
-    neo_api::{APIMessage},
+    neo_api::{APIMessage, ConnectionLock},
     serde_json,
     ws::{ManagedWebSocket, WebSocketCode},
 };
@@ -15,27 +17,18 @@ use serde::Deserialize;
 use tokio::select;
 
 use crate::{
-    db::UserProfile, leaderboard::LeaderboardEntry, GlobalState, LoginTokenData, LoginTokenGranter,
+    db::UserProfile, leaderboard::LeaderboardEntry, GlobalState, LoginTokenConfig, LoginTokenData,
 };
 
 pub struct FirstConnectionState {
     globals: GlobalState,
-    token: Option<VerifiedToken<LoginTokenGranter>>,
+    token: Option<VerifiedToken<LoginTokenConfig>>,
 }
-
-
-// impl ClientIdentifier for FirstConnectionState {
-//     type ClientID = Arc<LoginTokenData>;
-
-//     fn get_client_identifier(&self) -> Self::ClientID {
-//         self.token.
-//     }
-// }
-
 
 pub struct SessionState {
     globals: GlobalState,
-    token: VerifiedToken<LoginTokenGranter>
+    token: VerifiedToken<LoginTokenConfig>,
+    _conn_lock: ConnectionLock<Arc<String>>,
 }
 
 #[async_trait]
@@ -47,13 +40,12 @@ where
 
     async fn from_request(req: Request<B>, state: &GlobalState) -> Result<Self, Self::Rejection> {
         let (mut parts, _) = req.into_parts();
-        let token = match VerifiedToken::<LoginTokenGranter>::from_request_parts(&mut parts, state)
-            .await
-        {
-            Ok(token) => Some(token),
-            Err(TokenVerificationError::MissingToken) => None,
-            Err(e) => return Err(e)
-        };
+        let token =
+            match VerifiedToken::<LoginTokenConfig>::from_request_parts(&mut parts, state).await {
+                Ok(token) => Some(token),
+                Err(TokenVerificationError::MissingToken) => None,
+                Err(e) => return Err(e),
+            };
 
         Ok(Self {
             globals: state.clone(),
@@ -62,14 +54,12 @@ where
     }
 }
 
-// #[derive(Deserialize, serde::Serialize)]
 #[derive(Deserialize)]
 struct ScoreUpdateRequest<'a> {
     difficulty: &'a str,
     score: u16,
 }
 
-// #[derive(Deserialize, serde::Serialize)]
 #[derive(Deserialize)]
 enum WSAPIMessageImpl<'a> {
     #[serde(borrow)]
@@ -107,10 +97,31 @@ impl APIMessage for WSAPIMessage {
         mut ws: ManagedWebSocket,
     ) -> Option<(ManagedWebSocket, SessionState)> {
         if let Some(token) = session_state.token {
-            let profile = match session_state.globals.db.get_user_profile_by_email(&token.item.email).await {
+            let Ok(conn_lock) = session_state
+                .globals
+                .api_conn_manager
+                .get_connection_lock(
+                    Arc::new(token
+                        .item
+                        .email
+                        .clone()))
+                else {
+                    ws.close_frame(WebSocketCode::BadPayload, "Already Connected");
+                    return None
+                };
+
+            let profile = match session_state
+                .globals
+                .db
+                .get_user_profile_by_email(&token.item.email)
+                .await
+            {
                 Ok(Some(profile)) => profile,
                 Ok(None) => {
-                    warn!("Got valid session token without associated account: {}", token.item.email);
+                    warn!(
+                        "Got valid session token without associated account: {}",
+                        token.item.email
+                    );
                     ws.close_frame(WebSocketCode::BadPayload, "User does not exist");
                     return None;
                 }
@@ -120,14 +131,15 @@ impl APIMessage for WSAPIMessage {
                     return None;
                 }
             };
-            
+
             ws = ws.send(serde_json::to_string(&profile).unwrap())?;
 
             Some((
                 ws,
                 SessionState {
                     globals: session_state.globals,
-                    token
+                    token,
+                    _conn_lock: conn_lock,
                 },
             ))
         } else {
@@ -190,7 +202,10 @@ impl APIMessage for WSAPIMessage {
                 ws.send("Success!")
             }
             WSAPIMessageImpl::Logout => {
-                session_state.globals.login_tokens.revoke_token(&session_state.token.token);
+                session_state
+                    .globals
+                    .login_tokens
+                    .revoke_token(&session_state.token.token);
                 ws.close_frame(WebSocketCode::Ok, "Successfully logged out");
                 None
             }
@@ -226,6 +241,13 @@ async fn login(
         return None
     };
 
+    let Ok(conn_lock) = globals.api_conn_manager.get_connection_lock(
+        Arc::new(email.clone())
+    ) else {
+        ws.close_frame(WebSocketCode::BadPayload, "Already Connected");
+        return None
+    };
+
     let new_session_state;
 
     match db.get_user_profile_by_email(&email).await {
@@ -240,7 +262,8 @@ async fn login(
 
             new_session_state = SessionState {
                 globals: session_state.globals,
-                token
+                token,
+                _conn_lock: conn_lock,
             };
         }
         Ok(None) => {
@@ -347,7 +370,8 @@ async fn login(
 
             new_session_state = SessionState {
                 globals: session_state.globals,
-                token
+                token,
+                _conn_lock: conn_lock,
             };
         }
         Err(e) => {

@@ -1,9 +1,12 @@
 #![feature(trivial_bounds)]
 #![feature(string_leak)]
 
-use std::{net::{ToSocketAddrs, SocketAddr}, time::Duration};
+use std::{
+    net::{SocketAddr, ToSocketAddrs},
+    sync::Arc,
+    time::Duration,
+};
 
-// use aws_config::{SdkConfig};
 use anyhow::{self, Context};
 use axum::{extract::FromRef, http::HeaderValue, routing::get};
 use db::DB;
@@ -17,8 +20,8 @@ use mangle_api_core::{
             google::{new_google_oidc_from_file, GoogleOIDC},
             OIDCState,
         },
+        token::{HeaderTokenGranterConfig, TokenGranter, TokenGranterConfig},
     },
-    create_header_token_granter,
     distributed::Node,
     get_pipe_name, make_app,
     neo_api::{ws_api_route, APIConnectionManager},
@@ -43,7 +46,18 @@ struct LoginTokenData {
 
 const WS_PING_DELAY: Duration = Duration::from_secs(45);
 
-create_header_token_granter!( LoginTokenGranter "Login-Token" 32 LoginTokenData);
+enum LoginTokenConfig {}
+
+impl TokenGranterConfig for LoginTokenConfig {
+    type TokenDistinguisher = LoginTokenData;
+    const TOKEN_LENGTH: usize = 32;
+}
+
+impl HeaderTokenGranterConfig for LoginTokenConfig {
+    const HEADER_NAME: &'static str = "Login-Token";
+}
+
+type LoginTokenGranter = TokenGranter<LoginTokenConfig>;
 
 #[derive(Clone, FromRef)]
 struct GlobalState {
@@ -54,7 +68,7 @@ struct GlobalState {
     login_tokens: LoginTokenGranter,
     // node: Node<NetworkMessage>,
     leaderboard: Leaderboard,
-    api_conn_manager: APIConnectionManager,
+    api_conn_manager: APIConnectionManager<Arc<String>>,
 }
 
 #[tokio::main]
@@ -140,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
             ("/oidc/redirect", openid_redirect!()),
             (
                 "/ws_api",
-                ws_api_route::<FirstConnectionState, SessionState, WSAPIMessage, _, _>(),
+                ws_api_route::<FirstConnectionState, SessionState, WSAPIMessage, _, _, _>(),
             ),
             // ("/login", get(user_auth::login)),
             // ("/quick_login", get(user_auth::quick_login)),
