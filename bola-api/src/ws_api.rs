@@ -20,7 +20,7 @@ use tokio::select;
 use crate::{
     db::UserProfile,
     leaderboard::{LeaderboardEntry, LeaderboardUpdate},
-    GlobalState, LoginTokenConfig, LoginTokenData,
+    GlobalState, LoginTokenConfig, LoginTokenData, tournament::{TournamentData},
 };
 use std::ops::Deref;
 pub struct FirstConnectionState {
@@ -267,14 +267,14 @@ impl APIMessage for WSAPIMessage {
             WSAPIMessageImpl::Login => login(session_state, ws).await,
             WSAPIMessageImpl::GetTournament => {
                 match session_state.globals.tournament.get_tournament_week() {
-                    Some(n) => ws.send(n.to_string()),
+                    Some(data) => ws.send(serde_json::to_string(&data).unwrap()),
                     None => ws.send("Internal Error"),
                 }
             }
             WSAPIMessageImpl::WinTournament => {
                 let login_token = check_login!();
 
-                let Some(week) = session_state.globals.tournament.get_tournament_week() else {
+                let Some(TournamentData { week, .. }) = session_state.globals.tournament.get_tournament_week() else {
                     return ws.send("Internal Error")
                 };
 
