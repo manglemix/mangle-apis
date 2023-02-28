@@ -31,9 +31,11 @@ mod config;
 mod db;
 mod leaderboard;
 mod network;
+mod tournament;
 mod ws_api;
 
 use config::Config;
+use tournament::Tournament;
 use ws_api::{FirstConnectionState, SessionState, WSAPIMessage};
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -64,9 +66,9 @@ struct GlobalState {
     goidc: GoogleOIDC,
     auth_pages: AuthPages,
     login_tokens: LoginTokenGranter,
-    // node: Node<NetworkMessage>,
     leaderboard: Leaderboard,
     api_conn_manager: APIConnectionManager<Arc<String>>,
+    tournament: Tournament,
 }
 
 #[tokio::main]
@@ -104,11 +106,11 @@ async fn main() -> anyhow::Result<()> {
             success: "Success".into(),
         }),
         oidc_state,
-        login_tokens: LoginTokenGranter::new(Duration::from_secs(config.token_duration)),
+        login_tokens: LoginTokenGranter::new(config.token_duration),
         leaderboard: Leaderboard::new(db.clone(), node, 5).await?,
-        // node,
         db,
         api_conn_manager: APIConnectionManager::new(WS_PING_DELAY),
+        tournament: Tournament::new(config.start_week_time),
     };
 
     let config = BaseConfig {

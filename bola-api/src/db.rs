@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Error};
-use aws_sdk_dynamodb::{error::GetItemErrorKind, model::AttributeValue, Client};
+use aws_sdk_dynamodb::{
+    error::GetItemErrorKind,
+    model::{AttributeAction, AttributeValue, AttributeValueUpdate},
+    Client,
+};
 use aws_types::SdkConfig;
 use serde::{Deserialize, Serialize};
 
@@ -32,40 +36,6 @@ impl DB {
         }
     }
 
-    // pub async fn get_email_from_username(
-    //     &self,
-    //     username: impl Into<String>,
-    // ) -> Result<Option<String>, Error> {
-    //     let username = username.into();
-
-    //     let query = self
-    //         .client
-    //         .query()
-    //         .table_name(self.bola_profiles_table.clone())
-    //         .index_name("username-index")
-    //         .key_condition_expression("username = :check_username")
-    //         .expression_attribute_values(":check_username", AttributeValue::S(username.clone()))
-    //         .projection_expression("email")
-    //         .send()
-    //         .await
-    //         .map_err(Error::from)?;
-
-    //     let Some(item) = query.items()
-    //         .ok_or_else(|| anyhow!("query had no items field"))?
-    //         .first() else
-    //         {
-    //             return Ok(None)
-    //         };
-
-    //     Ok(Some(
-    //         item.get("email")
-    //             .ok_or_else(|| anyhow!("user: {username} had no email!"))?
-    //             .as_s()
-    //             .map_err(|_| anyhow!("user: {username} had non-string email"))?
-    //             .clone(),
-    //     ))
-    // }
-
     pub async fn is_username_taken(&self, username: impl Into<String>) -> Result<bool, Error> {
         self.client
             .query()
@@ -78,47 +48,6 @@ impl DB {
             .map(|x| x.count() > 0)
             .map_err(Into::into)
     }
-
-    // pub async fn get_user_profile_by_username(
-    //     &self,
-    //     username: impl Into<String>,
-    // ) -> Result<UserProfile, GetUserProfileError> {
-    //     let email = username.into();
-    //     // if !self.regex.is_match(&email) {
-    //     //     return Err(GetUserProfileError::NotAnEmail)
-    //     // }
-
-    //     let item = match self
-    //         .client
-    //         .query()
-    //         .table_name(self.bola_profiles_table.clone())
-    //         .index_name("username-index")
-    //         .key_condition_expression("username = :check_username")
-    //         .expression_attribute_values(":check_username", AttributeValue::S(username.into()))
-    //         .send()
-    //         .await
-    //         .map_err(|e| e.into_service_error())
-    //     {
-    //         Ok(x) => Ok(x),
-    //         Err(e) => Err(match &e.kind {
-    //             QueryErrorKind::InternalServerError(_) => todo!(),
-    //             QueryErrorKind::InvalidEndpointException(_) => todo!(),
-    //             QueryErrorKind::ProvisionedThroughputExceededException(_) => todo!(),
-    //             QueryErrorKind::RequestLimitExceeded(_) => todo!(),
-    //             QueryErrorKind::ResourceNotFoundException(_) => todo!(),
-    //             QueryErrorKind::Unhandled(_) => todo!(),
-    //             _ => todo!(),
-    //         })
-    //     }?;
-
-    //     Self::map_to_user_profile(
-    //         item
-    //             .items()
-    //             .ok_or(GetItemError::ItemNotFound)?
-    //             .get(0)
-    //             .ok_or(GetItemError::ItemNotFound)?
-    //     )
-    // }
 
     pub async fn get_user_profile_by_email(
         &self,
@@ -200,7 +129,7 @@ impl DB {
         username: String,
         tournament_wins: Vec<u16>,
     ) -> Result<(), Error> {
-        let mut request = self
+        match self
             .client
             .put_item()
             .table_name(self.bola_profiles_table.clone())
@@ -208,17 +137,57 @@ impl DB {
             .item("easy_highscore", AttributeValue::N("0".into()))
             .item("normal_highscore", AttributeValue::N("0".into()))
             .item("expert_highscore", AttributeValue::N("0".into()))
-            .item("username", AttributeValue::S(username))
-            .item("unused", AttributeValue::N("0".into()));
-
-        if !tournament_wins.is_empty() {
-            request = request.item(
+            .item(
                 "tournament_wins",
                 AttributeValue::Ns(tournament_wins.iter().map(ToString::to_string).collect()),
-            );
+            )
+            .item("username", AttributeValue::S(username))
+            .item("unused", AttributeValue::N("0".into()))
+            .send()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.into()),
         }
+    }
 
-        match request.send().await {
+    pub async fn win_tournament(&self, week: u64, email: String) -> Result<(), Error> {
+        let mut tournament_wins = self
+            .client
+            .get_item()
+            .table_name(self.bola_profiles_table.clone())
+            .key("email", AttributeValue::S(email.clone()))
+            .projection_expression("tournament_wins")
+            .send()
+            .await
+            .map_err(|e| e.into_service_error())?
+            .item()
+            .and_then(|x| x.get("tournament_wins"))
+            .map(|x| {
+                x.as_ns().cloned().map_err(|_| {
+                    Error::msg("Could not deserialize field: tournament_wins in user profile")
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        tournament_wins.push(week.to_string());
+
+        match self
+            .client
+            .update_item()
+            .table_name(self.bola_profiles_table.clone())
+            .key("email", AttributeValue::S(email))
+            .attribute_updates(
+                "tournament_wins",
+                AttributeValueUpdate::builder()
+                    .action(AttributeAction::Put)
+                    .value(AttributeValue::Ns(tournament_wins))
+                    .build(),
+            )
+            .send()
+            .await
+        {
             Ok(_) => Ok(()),
             Err(e) => Err(e.into()),
         }

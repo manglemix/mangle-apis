@@ -84,6 +84,8 @@ enum WSAPIMessageImpl<'a> {
         difficulty: &'a str,
     },
     Login,
+    GetTournament,
+    WinTournament,
 }
 
 pub struct WSAPIMessage {
@@ -263,6 +265,31 @@ impl APIMessage for WSAPIMessage {
                 }
             }
             WSAPIMessageImpl::Login => login(session_state, ws).await,
+            WSAPIMessageImpl::GetTournament => {
+                match session_state.globals.tournament.get_tournament_week() {
+                    Some(n) => ws.send(n.to_string()),
+                    None => ws.send("Internal Error"),
+                }
+            }
+            WSAPIMessageImpl::WinTournament => {
+                let login_token = check_login!();
+
+                let Some(week) = session_state.globals.tournament.get_tournament_week() else {
+                    return ws.send("Internal Error")
+                };
+
+                if let Err(e) = session_state
+                    .globals
+                    .db
+                    .win_tournament(week, login_token.item.email.to_string())
+                    .await
+                {
+                    error!(target: "tournament", "Faced the following error while winning tournament for {}: {e:?}", login_token.item.email);
+                    ws.send("Internal Error")
+                } else {
+                    ws.send("Success")
+                }
+            }
         }
     }
 }

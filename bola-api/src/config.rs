@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 use serde::Deserialize;
 
@@ -28,9 +28,11 @@ pub struct Config {
     // pub github_client_secret_path: String,
     pub api_token: String,
     #[serde(default = "token_duration")]
-    pub token_duration: u64,
+    pub token_duration: Duration,
     #[serde(default = "Default::default")]
     pub sibling_domains: HashMap<String, SocketAddr>,
+
+    pub start_week_time: Duration,
 }
 
 fn default_server_address() -> String {
@@ -57,9 +59,9 @@ fn bola_profiles_table() -> String {
     "bola_profiles".into()
 }
 
-fn token_duration() -> u64 {
+fn token_duration() -> Duration {
     // 30 days
-    60 * 60 * 24 * 30
+    Duration::from_secs(60 * 60 * 24 * 30)
 }
 
 fn network_port() -> u16 {
