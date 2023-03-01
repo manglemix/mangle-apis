@@ -129,7 +129,7 @@ impl DB {
         username: String,
         tournament_wins: Vec<u16>,
     ) -> Result<(), Error> {
-        match self
+        let mut req = self
             .client
             .put_item()
             .table_name(self.bola_profiles_table.clone())
@@ -137,15 +137,17 @@ impl DB {
             .item("easy_highscore", AttributeValue::N("0".into()))
             .item("normal_highscore", AttributeValue::N("0".into()))
             .item("expert_highscore", AttributeValue::N("0".into()))
-            .item(
+            .item("username", AttributeValue::S(username))
+            .item("unused", AttributeValue::N("0".into()));
+
+        if !tournament_wins.is_empty() {
+            req = req.item(
                 "tournament_wins",
                 AttributeValue::Ns(tournament_wins.iter().map(ToString::to_string).collect()),
-            )
-            .item("username", AttributeValue::S(username))
-            .item("unused", AttributeValue::N("0".into()))
-            .send()
-            .await
-        {
+            );
+        }
+
+        match req.send().await {
             Ok(_) => Ok(()),
             Err(e) => Err(e.into()),
         }

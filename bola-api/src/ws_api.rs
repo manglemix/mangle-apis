@@ -213,7 +213,7 @@ impl APIMessage for WSAPIMessage {
                     return ws.send("Internal Error");
                 }
 
-                ws.send("Success!")
+                ws.send("Success")
             }
             WSAPIMessageImpl::Logout => {
                 let login_token = check_login!();
@@ -440,6 +440,8 @@ async fn login(
                 let e = anyhow::Error::from(e);
                 error!(target: "login", "{:?}", e.context(format!("adding expert entry for {email}")));
             }
+
+            ws = ws.send("Success")?;
 
             let login_token = globals.login_tokens.create_token(LoginTokenData {
                 email,
