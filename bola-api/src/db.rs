@@ -171,7 +171,10 @@ impl DB {
             .transpose()?
             .unwrap_or_default();
 
-        tournament_wins.push(week.to_string());
+        let week = week.to_string();
+        if !tournament_wins.contains(&week) {
+            tournament_wins.push(week);
+        }
 
         match self
             .client

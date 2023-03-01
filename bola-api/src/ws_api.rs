@@ -18,9 +18,8 @@ use serde::Deserialize;
 use tokio::select;
 
 use crate::{
-    db::UserProfile,
-    leaderboard::{LeaderboardEntry, LeaderboardUpdate},
-    GlobalState, LoginTokenConfig, LoginTokenData, tournament::{TournamentData},
+    db::UserProfile, leaderboard::LeaderboardEntry, tournament::TournamentData, GlobalState,
+    LoginTokenConfig, LoginTokenData,
 };
 use std::ops::Deref;
 pub struct FirstConnectionState {
@@ -80,8 +79,8 @@ enum WSAPIMessageImpl<'a> {
     },
     Logout,
     GetLeaderboard {
-        #[serde(borrow)]
-        difficulty: &'a str,
+        #[serde(default = "Default::default")]
+        refresh: bool,
     },
     Login,
     GetTournament,
@@ -223,48 +222,46 @@ impl APIMessage for WSAPIMessage {
                     .globals
                     .login_tokens
                     .revoke_token(&login_token.token);
-                ws.close_frame(WebSocketCode::Ok, "Successfully logged out");
-                None
+                session_state.logged_in = None;
+                ws.send("Success")
             }
-            WSAPIMessageImpl::GetLeaderboard { difficulty } => {
+            WSAPIMessageImpl::GetLeaderboard { refresh } => {
                 let leaderboard = &session_state.globals.leaderboard;
 
-                macro_rules! leaderboard {
-                    ($first_fn: ident, $second_fn: ident) => {{
-                        let mut opt_ws = ws.send(serde_json::to_string(
-                            &leaderboard.$first_fn()
-                        ).unwrap());
+                let mut opt_ws = if refresh {
+                    ws.send(serde_json::to_string(&leaderboard.get_leaderboard()).unwrap())
+                } else {
+                    ws.send(
+                        serde_json::to_string(&leaderboard.get_leaderboard_since(todo!())).unwrap(),
+                    )
+                };
 
-                        loop {
-                            select! {
-                                opt = ManagedWebSocket::option_recv(&mut opt_ws) => {
-                                    opt.as_ref()?;  // Return if None
-                                    break opt_ws.unwrap().send("Unsubscribed")
-                                }
-                                opt = leaderboard.$second_fn() => {
-                                    if let Some(LeaderboardUpdate{ leaderboard }) = opt {
-                                        opt_ws = Some(opt_ws.unwrap().send(
-                                            serde_json::to_string(leaderboard.deref())
-                                                .expect("leaderboard to serialize")
-                                        )?);
-                                    } else {
-                                        opt_ws.unwrap().close_frame(WebSocketCode::InternalError, "Leaderboard Closed");
-                                        break None
-                                    }
-                                }
+                loop {
+                    select! {
+                        opt = ManagedWebSocket::option_recv(&mut opt_ws) => {
+                            opt.as_ref()?;  // Return if None
+                            break opt_ws.unwrap().send("Unsubscribed")
+                        }
+                        opt = leaderboard.wait_for_update() => {
+                            if let Some(update) = opt {
+                                opt_ws = Some(opt_ws.unwrap().send(
+                                    serde_json::to_string(update.deref()).unwrap()
+                                )?);
+                            } else {
+                                opt_ws.unwrap().close_frame(WebSocketCode::InternalError, "Leaderboard Closed");
+                                break None
                             }
                         }
-                    }};
-                }
-
-                match difficulty {
-                    "easy" => leaderboard!(get_easy_leaderboard, wait_for_easy_update),
-                    "normal" => leaderboard!(get_normal_leaderboard, wait_for_normal_update),
-                    "expert" => leaderboard!(get_expert_leaderboard, wait_for_expert_update),
-                    _ => ws.send("Not a valid difficulty"),
+                    }
                 }
             }
-            WSAPIMessageImpl::Login => login(session_state, ws).await,
+            WSAPIMessageImpl::Login => {
+                if session_state.logged_in.is_some() {
+                    ws.send("Already Logged In")
+                } else {
+                    login(session_state, ws).await
+                }
+            }
             WSAPIMessageImpl::GetTournament => {
                 match session_state.globals.tournament.get_tournament_week() {
                     Some(data) => ws.send(serde_json::to_string(&data).unwrap()),
@@ -317,12 +314,10 @@ async fn login(
     ws = opt_ws.unwrap();
 
     let Some(data) = auth_option else {
-        ws.close_frame(WebSocketCode::Ok, "Auth Failed");
-        return None
+        return ws.send("Auth Failed")
     };
     let Some(email) = data.email else {
-        ws.close_frame(WebSocketCode::BadPayload, "Auth Failed");
-        return None
+        return ws.send("Auth Failed")
     };
 
     let Ok(conn_lock) = globals.api_conn_manager.get_connection_lock(
