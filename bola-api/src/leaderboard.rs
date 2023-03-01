@@ -53,7 +53,7 @@ pub enum AddLeaderboardEntryError {
     InternalError,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Serialize)]
 pub struct LeaderboardView {
     easy: Vec<LeaderboardEntry>,
     normal: Vec<LeaderboardEntry>,
@@ -122,7 +122,7 @@ impl Leaderboard {
         node: Node<NetworkMessage>,
         leaderboard_span: usize,
     ) -> Result<Self, anyhow::Error> {
-        let inner2 = Arc::new(LeaderboardImpl {
+        let inner = Arc::new(LeaderboardImpl {
             easy_leaderboard: RwLock::new(
                 Self::pull_leaderboard(&db, "easy_highscore", leaderboard_span).await?,
             ),
@@ -138,7 +138,8 @@ impl Leaderboard {
             db,
             node: node.clone(),
         });
-        let inner = inner2.clone();
+        let this = Self { inner };
+        let this2 = this.clone();
         let mut subscription = node.get_message_router().subscribe_to_highscore_update();
 
         spawn(async move {
@@ -148,37 +149,28 @@ impl Leaderboard {
                 };
 
                 match msg.difficulty.as_str() {
-                    "easy" => Self::local_update_leaderboard(
-                        leaderboard_span,
-                        &inner.easy_leaderboard,
-                        &inner.last_update,
+                    "easy" => this.local_update_leaderboard(
+                        &this.inner.easy_leaderboard,
                         LeaderboardEntry {
                             score: msg.score,
                             username: msg.username,
                         },
-                        &inner.leaderboard_updater,
                         LeaderboardUpdate::Easy,
                     ),
-                    "normal" => Self::local_update_leaderboard(
-                        leaderboard_span,
-                        &inner.normal_leaderboard,
-                        &inner.last_update,
+                    "normal" => this.local_update_leaderboard(
+                        &this.inner.normal_leaderboard,
                         LeaderboardEntry {
                             score: msg.score,
                             username: msg.username,
                         },
-                        &inner.leaderboard_updater,
                         LeaderboardUpdate::Normal,
                     ),
-                    "expert" => Self::local_update_leaderboard(
-                        leaderboard_span,
-                        &inner.expert_leaderboard,
-                        &inner.last_update,
+                    "expert" => this.local_update_leaderboard(
+                        &this.inner.expert_leaderboard,
                         LeaderboardEntry {
                             score: msg.score,
                             username: msg.username,
                         },
-                        &inner.leaderboard_updater,
                         LeaderboardUpdate::Expert,
                     ),
                     s => {
@@ -189,24 +181,26 @@ impl Leaderboard {
             }
         });
 
-        Ok(Self { inner: inner2 })
+        Ok(this2)
     }
 
     fn local_update_leaderboard(
-        leaderboard_span: usize,
+        &self,
         leaderboard: &RwLock<Vec<LeaderboardEntry>>,
-        time_update: &RwLock<Instant>,
         entry: LeaderboardEntry,
-        updater: &Sender<Arc<LeaderboardUpdate>>,
         update_fn: impl Fn(Vec<LeaderboardEntry>) -> LeaderboardUpdate,
     ) -> bool {
         let mut leaderboard_writer = leaderboard.write();
 
         macro_rules! update {
             () => {{
+                *self.inner.last_update.write() = Instant::now();
                 leaderboard_writer.sort_by(|a, b| b.cmp(a));
 
-                let _ = updater.send(Arc::new((update_fn)(leaderboard_writer.clone())));
+                let _ = self
+                    .inner
+                    .leaderboard_updater
+                    .send(Arc::new((update_fn)(leaderboard_writer.clone())));
 
                 return true;
             }};
@@ -233,7 +227,7 @@ impl Leaderboard {
         }
         let Some(entry) = entry else { update!() };
 
-        if leaderboard_writer.len() >= leaderboard_span {
+        if leaderboard_writer.len() >= self.inner.leaderboard_span {
             let last = leaderboard_writer.last_mut().unwrap();
             if *last >= entry {
                 return false;
@@ -242,8 +236,6 @@ impl Leaderboard {
         } else {
             leaderboard_writer.push(entry);
         }
-
-        *time_update.write() = Instant::now();
 
         update!()
     }
@@ -282,14 +274,7 @@ impl Leaderboard {
             return Err(AddLeaderboardEntryError::InternalError);
         }
 
-        if !Self::local_update_leaderboard(
-            self.inner.leaderboard_span,
-            leaderboard,
-            &self.inner.last_update,
-            entry.clone(),
-            &self.inner.leaderboard_updater,
-            update_fn,
-        ) {
+        if !self.local_update_leaderboard(leaderboard, entry.clone(), update_fn) {
             return Ok(());
         };
 
@@ -357,11 +342,11 @@ impl Leaderboard {
             expert: self.inner.expert_leaderboard.read().clone(),
         }
     }
-    pub fn get_leaderboard_since(&self, since: Instant) -> LeaderboardView {
-        if &since > self.inner.last_update.read().deref() {
-            LeaderboardView::default()
+    pub fn get_leaderboard_since(&self, since: Instant) -> Option<LeaderboardView> {
+        if &since < self.inner.last_update.read().deref() {
+            Some(self.get_leaderboard())
         } else {
-            self.get_leaderboard()
+            None
         }
     }
     pub async fn wait_for_update(&self) -> Option<Arc<LeaderboardUpdate>> {

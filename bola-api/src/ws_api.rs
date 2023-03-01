@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use axum::{
     async_trait,
@@ -35,6 +35,7 @@ struct LoggedIn {
 pub struct SessionState {
     globals: GlobalState,
     logged_in: Option<LoggedIn>,
+    last_leaderboard_retrieval: Option<Instant>,
 }
 
 #[async_trait]
@@ -78,10 +79,7 @@ enum WSAPIMessageImpl<'a> {
         score: u16,
     },
     Logout,
-    GetLeaderboard {
-        #[serde(default = "Default::default")]
-        refresh: bool,
-    },
+    GetLeaderboard,
     Login,
     GetTournament,
     WinTournament,
@@ -147,6 +145,7 @@ impl APIMessage for WSAPIMessage {
             SessionState {
                 globals: session_state.globals,
                 logged_in: session_state.logged_in,
+                last_leaderboard_retrieval: None,
             },
         ))
     }
@@ -225,18 +224,20 @@ impl APIMessage for WSAPIMessage {
                 session_state.logged_in = None;
                 ws.send("Success")
             }
-            WSAPIMessageImpl::GetLeaderboard { refresh } => {
+            WSAPIMessageImpl::GetLeaderboard => {
                 let leaderboard = &session_state.globals.leaderboard;
 
-                let mut opt_ws = if refresh {
-                    ws.send(serde_json::to_string(&leaderboard.get_leaderboard()).unwrap())
+                let mut opt_ws = if let Some(inst) = session_state.last_leaderboard_retrieval {
+                    if let Some(leaderboard) = leaderboard.get_leaderboard_since(inst) {
+                        ws.send(serde_json::to_string(&leaderboard).unwrap())
+                    } else {
+                        Some(ws)
+                    }
                 } else {
-                    ws.send(
-                        serde_json::to_string(&leaderboard.get_leaderboard_since(todo!())).unwrap(),
-                    )
+                    ws.send(serde_json::to_string(&leaderboard.get_leaderboard()).unwrap())
                 };
 
-                loop {
+                opt_ws = loop {
                     select! {
                         opt = ManagedWebSocket::option_recv(&mut opt_ws) => {
                             opt.as_ref()?;  // Return if None
@@ -247,13 +248,16 @@ impl APIMessage for WSAPIMessage {
                                 opt_ws = Some(opt_ws.unwrap().send(
                                     serde_json::to_string(update.deref()).unwrap()
                                 )?);
+
                             } else {
                                 opt_ws.unwrap().close_frame(WebSocketCode::InternalError, "Leaderboard Closed");
                                 break None
                             }
                         }
                     }
-                }
+                };
+                session_state.last_leaderboard_retrieval = Some(Instant::now());
+                opt_ws
             }
             WSAPIMessageImpl::Login => {
                 if session_state.logged_in.is_some() {
