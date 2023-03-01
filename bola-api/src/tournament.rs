@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use mangle_api_core::rand::{rngs::StdRng, SeedableRng, RngCore};
 
 const GET_TOURNAMENT_ERR_DURATION: Duration = Duration::from_secs(1);
 
@@ -20,6 +21,7 @@ pub struct Tournament {
 #[derive(Serialize)]
 pub struct TournamentData {
     pub week: u64,
+    pub seed: u32,
     start_time: u64,
     end_time: u64,
 }
@@ -55,6 +57,7 @@ impl Tournament {
             week,
             start_time: week * 3600 * 24 * 7 + start_time,
             end_time: (week + 1) * 3600 * 24 * 7 + start_time,
+            seed: StdRng::seed_from_u64(week).next_u32()
         })
     }
 }

@@ -51,6 +51,7 @@ pub use regex;
 pub use serde_json;
 pub use toml;
 pub use tower_http;
+pub use rand;
 
 mod log_targets {
     pub const SECURITY: &str = "suspicious_security";
