@@ -1,10 +1,10 @@
 use mangle_api_core::log::error;
+use mangle_api_core::rand::{rngs::StdRng, RngCore, SeedableRng};
 use serde::Serialize;
 use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use mangle_api_core::rand::{rngs::StdRng, SeedableRng, RngCore};
 
 const GET_TOURNAMENT_ERR_DURATION: Duration = Duration::from_secs(1);
 
@@ -57,7 +57,7 @@ impl Tournament {
             week,
             start_time: week * 3600 * 24 * 7 + start_time,
             end_time: (week + 1) * 3600 * 24 * 7 + start_time,
-            seed: StdRng::seed_from_u64(week).next_u32()
+            seed: StdRng::seed_from_u64(week).next_u32(),
         })
     }
 }

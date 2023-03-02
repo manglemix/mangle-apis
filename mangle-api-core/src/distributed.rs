@@ -2,17 +2,16 @@ use std::{mem::take, net::SocketAddr, sync::Arc};
 
 use anyhow::Error;
 use bimap::BiMap;
+use bincode::{deserialize, serialize};
+use log::{error, warn};
 use parking_lot::Mutex;
 use serde::{de::DeserializeOwned, Serialize};
-// use parking_lot::Mutex;
-use bincode::{deserialize, serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     spawn,
     task::JoinHandle,
 };
-#[cfg(not(debug_assertions))]
 use tokio_native_tls::{
     native_tls::{Identity, TlsAcceptor, TlsConnector},
     TlsAcceptor as TlsAcceptorWrapper, TlsConnector as TlsConnectorWrapper,
@@ -35,10 +34,7 @@ pub trait NetworkMessageSet: Sized + DeserializeOwned + Serialize + 'static {
 struct NodeImpl<T: NetworkMessageSet> {
     sibling_domains: BiMap<Arc<str>, SocketAddr>,
     message_router: T::MessageRouter,
-    #[cfg(not(debug_assertions))]
-    tls_builder: TlsConnectorWrapper,
-    // message_receiver: broadcast::Receiver<(&'static str, T)>,
-    // connections: Mutex<HashMap<&'static str, TlsStream<TcpStream>>>,
+    tls_builder: Option<TlsConnectorWrapper>,
     network_port: u16,
     task_handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -60,17 +56,15 @@ impl<T: NetworkMessageSet> Node<T> {
     pub async fn new(
         sibling_domains: impl IntoIterator<Item = (String, SocketAddr)>,
         network_port: u16,
-        #[cfg(not(debug_assertions))] identity: Identity,
+        identity: Option<Identity>,
     ) -> anyhow::Result<Self> {
-        // let (task_message_sender, message_receiver) = broadcast::channel(16);
-
         let inner2 = Arc::new(NodeImpl {
             message_router: T::MessageRouter::new(),
-            #[cfg(not(debug_assertions))]
-            tls_builder: TlsConnectorWrapper::from(TlsConnector::builder().build()?),
-
-            // message_receiver,
-            // connections: Mutex::new(HashMap::with_capacity(sibling_domains.len())),
+            tls_builder: if identity.is_some() {
+                Some(TlsConnectorWrapper::from(TlsConnector::builder().build()?))
+            } else {
+                None
+            },
             sibling_domains: sibling_domains
                 .into_iter()
                 .map(|(mut domain, addr)| unsafe {
@@ -83,39 +77,52 @@ impl<T: NetworkMessageSet> Node<T> {
         });
 
         let inner = inner2.clone();
-        #[cfg(not(debug_assertions))]
-        let tls_acceptor = TlsAcceptorWrapper::from(TlsAcceptor::new(identity)?);
+        let tls_acceptor = if let Some(identity) = identity {
+            Some(TlsAcceptorWrapper::from(TlsAcceptor::new(identity)?))
+        } else {
+            None
+        };
         let acceptor = TcpListener::bind(("0.0.0.0", network_port)).await?;
 
         *inner2.task_handle.lock() = Some(spawn(async move {
             loop {
-                let Ok((stream, addr)) = acceptor.accept().await else { continue };
+                let Ok((mut stream, addr)) = acceptor.accept().await else { continue };
 
                 let inner2 = inner.clone();
-                #[cfg(not(debug_assertions))]
                 let tls_acceptor2 = tls_acceptor.clone();
-                // let task_message_sender2 = task_message_sender.clone();
 
                 spawn(async move {
                     let Some(connection_domain) = inner2.sibling_domains.get_by_right(&addr) else {
-                        // WARN
+                        warn!(target: "security", "Got attempted connection from {addr}");
                         return
                     };
 
-                    #[cfg(debug_assertions)]
-                    let mut stream = stream;
-                    #[cfg(not(debug_assertions))]
-                    let Ok(mut stream) = tls_acceptor2.accept(stream).await else { return };
-                    let mut buf = Vec::new();
-                    if stream.read_to_end(&mut buf).await.is_err() {
-                        return;
+                    macro_rules! read {
+                        ($stream: expr) => {{
+                            let mut buf = Vec::new();
+                            if $stream.read_to_end(&mut buf).await.is_err() {
+                                return;
+                            }
+                            let Ok(msg) = deserialize(buf.as_slice()) else {
+                                                        error!("Received bad message from {addr}");
+                                                        return
+                                                    };
+
+                            T::MessageRouter::route_message(
+                                &inner2.message_router,
+                                connection_domain,
+                                msg,
+                            );
+                        }};
                     }
-                    let Ok(msg) = deserialize(buf.as_slice()) else {
-                        // ERROR
-                        return
-                    };
 
-                    T::MessageRouter::route_message(&inner2.message_router, connection_domain, msg);
+                    match &tls_acceptor2 {
+                        Some(tls_acceptor) => {
+                            let Ok(mut stream) = tls_acceptor.accept(stream).await else { return };
+                            read!(stream)
+                        }
+                        None => read!(stream),
+                    };
                 });
             }
         }));
@@ -132,15 +139,19 @@ impl<T: NetworkMessageSet> Node<T> {
         if !self.inner.sibling_domains.contains_left(domain) {
             return Err(Error::msg(format!("{domain} is not a sibling")));
         }
-        let connection = TcpStream::connect((domain, self.inner.network_port)).await?;
-        #[cfg(debug_assertions)]
-        let mut connection = connection;
-        #[cfg(not(debug_assertions))]
-        let mut connection = self.inner.tls_builder.connect(domain, connection).await?;
-        connection
-            .write_all(message.as_slice())
-            .await
-            .map_err(Into::into)
+        let mut connection = TcpStream::connect((domain, self.inner.network_port)).await?;
+        match &self.inner.tls_builder {
+            Some(tls_builder) => tls_builder
+                .connect(domain, connection)
+                .await?
+                .write_all(message.as_slice())
+                .await
+                .map_err(Into::into),
+            None => connection
+                .write_all(message.as_slice())
+                .await
+                .map_err(Into::into),
+        }
     }
 
     pub async fn broadcast_message(&self, message: &T) -> Vec<(String, Error)> {
@@ -154,7 +165,7 @@ impl<T: NetworkMessageSet> Node<T> {
             .collect::<Vec<_>>();
 
         for domain in domains {
-            let connection =
+            let mut connection =
                 match TcpStream::connect((domain.as_str(), self.inner.network_port)).await {
                     Ok(x) => x,
                     Err(e) => {
@@ -162,19 +173,25 @@ impl<T: NetworkMessageSet> Node<T> {
                         continue;
                     }
                 };
-            #[cfg(debug_assertions)]
-            let mut connection = connection;
-            #[cfg(not(debug_assertions))]
-            let mut connection = match self.inner.tls_builder.connect(domain, connection).await {
-                Ok(x) => x,
-                Err(e) => {
-                    results.push((domain.as_str(), e.into()));
-                    continue;
+            match &self.inner.tls_builder {
+                Some(tls_builder) => {
+                    match tls_builder.connect(&domain, connection).await {
+                        Ok(mut connection) => {
+                            if let Err(e) = connection.write_all(message.as_slice()).await {
+                                results.push((domain, e.into()));
+                            }
+                        }
+                        Err(e) => {
+                            results.push((domain, e.into()));
+                            continue;
+                        }
+                    };
                 }
-            };
-            match connection.write_all(message.as_slice()).await {
-                Ok(_) => {}
-                Err(e) => results.push((domain, e.into())),
+                None => {
+                    if let Err(e) = connection.write_all(message.as_slice()).await {
+                        results.push((domain, e.into()));
+                    }
+                }
             }
         }
 
