@@ -2,9 +2,8 @@
 #![feature(string_leak)]
 
 use std::{
-    net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
-    time::Duration,
+    time::Duration, fs::read_to_string,
 };
 
 use anyhow::{self, Context};
@@ -23,7 +22,7 @@ use mangle_api_core::{
     distributed::Node,
     get_pipe_name, make_app,
     neo_api::{ws_api_route, APIConnectionManager},
-    pre_matches, start_api, BaseConfig, BindAddress,
+    pre_matches, start_api, BaseConfig,
 };
 use tokio::{self};
 
@@ -75,11 +74,22 @@ struct GlobalState {
 async fn main() -> anyhow::Result<()> {
     let app = make_app("BolaAPI", env!("CARGO_PKG_VERSION"), "The API for Bola", []);
 
-    let pipe_name = get_pipe_name("BOLA_PIPE_NAME", "/dev/bola_pipe");
+    let pipe_name = get_pipe_name("BOLA_PIPE_NAME", "/dev/bola_pipe.sock");
 
     let Some(config) = pre_matches::<Config>(app.clone(), &pipe_name).await? else {
         return Ok(())
     };
+
+    let css = read_to_string(&config.stylesheet_path)
+        .context(format!("Reading {}", config.stylesheet_path))?;
+    let internal_error_page = read_to_string(&config.internal_error_path)
+        .context(format!("Reading {}", config.internal_error_path))?;
+    let invalid_page = read_to_string(&config.invalid_path)
+        .context(format!("Reading {}", config.invalid_path))?;
+    let success_page = read_to_string(&config.success_path)
+        .context(format!("Reading {}", config.success_path))?;
+    let late_page = read_to_string(&config.late_path)
+        .context(format!("Reading {}", config.late_path))?;
 
     let builder = aws_config::from_env();
     #[cfg(debug_assertions)]
@@ -100,10 +110,10 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("parsing google oauth")?,
         auth_pages: AuthPages::new(AuthPagesSrc {
-            internal_error: "Internal Error".into(),
-            late: "Late".into(),
-            invalid: "Invalid".into(),
-            success: "Success".into(),
+            internal_error: internal_error_page,
+            late: late_page,
+            invalid: invalid_page,
+            success: success_page,
         }),
         oidc_state,
         login_tokens: LoginTokenGranter::new(config.token_duration),
@@ -115,10 +125,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config = BaseConfig {
         api_token: HeaderValue::from_str(&config.api_token).context("parsing api_token")?,
-        bind_address: (config.server_address, config.server_port)
-            .to_socket_addrs()
-            .map(|mut x| BindAddress::Network(x.next().expect("At least 1 socket addr")))
-            .context("parsing server_address and server_port")?,
+        bind_address: config.bind_address,
         stderr_log_path: config.stderr_log,
         routing_log_path: config.routing_log,
         security_log_path: config.security_log,
@@ -144,14 +151,18 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
-    start_api::<_, 1, 2, _, _, _>(
+    start_api(
         state,
         app,
         pipe_name,
         config,
-        ["^/oidc/"],
+        [
+            "^/oidc/",
+            "^/manglemix.css$"
+        ],
         [
             ("/oidc/redirect", openid_redirect()),
+            ("/manglemix.css", axum::routing::get(|| async move { css.clone() })),
             (
                 "/ws_api",
                 ws_api_route::<FirstConnectionState, SessionState, WSAPIMessage, _, _, _>(),

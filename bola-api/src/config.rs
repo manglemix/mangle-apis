@@ -1,13 +1,11 @@
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
+use mangle_api_core::BindAddress;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub struct Config {
-    #[serde(default = "default_server_address")]
-    pub server_address: String,
-    #[serde(default = "default_server_port")]
-    pub server_port: u16,
+    pub bind_address: BindAddress,
     #[serde(default = "stderr_log")]
     pub stderr_log: String,
     #[serde(default = "routing_log")]
@@ -33,14 +31,17 @@ pub struct Config {
     pub sibling_domains: HashMap<String, SocketAddr>,
 
     pub start_week_time: Duration,
-}
 
-fn default_server_address() -> String {
-    "0.0.0.0".into()
-}
-
-fn default_server_port() -> u16 {
-    80
+    #[serde(default = "stylesheet_path")]
+    pub stylesheet_path: String,
+    #[serde(default = "invalid_path")]
+    pub invalid_path: String,
+    #[serde(default = "invalid_path")]
+    pub internal_error_path: String,
+    #[serde(default = "success_path")]
+    pub success_path: String,
+    #[serde(default = "late_path")]
+    pub late_path: String,
 }
 
 fn stderr_log() -> String {
@@ -52,7 +53,7 @@ fn routing_log() -> String {
 }
 
 fn suspicious_security_log() -> String {
-    "suspicious_security.log".into()
+    "security.log".into()
 }
 
 fn bola_profiles_table() -> String {
@@ -66,4 +67,20 @@ fn token_duration() -> Duration {
 
 fn network_port() -> u16 {
     10419
+}
+
+fn stylesheet_path() -> String {
+    "manglemix.css".into()
+}
+
+fn invalid_path() -> String {
+    "invalid.html".into()
+}
+
+fn success_path() -> String {
+    "success.html".into()
+}
+
+fn late_path() -> String {
+    "late.html".into()
 }

@@ -16,7 +16,6 @@ pub mod db;
 use anyhow::{Context, Error, Result};
 use clap::builder::IntoResettable;
 use clap::{arg, Command};
-use derive_more::From;
 use mangle_detached_console::{send_message, ConsoleSendError};
 
 use fern::{log_file, Dispatch};
@@ -24,6 +23,7 @@ use log::{error, info, warn, LevelFilter};
 use mangle_detached_console::ConsoleServer;
 use parking_lot::Mutex;
 use regex::{Regex, RegexSet};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -90,20 +90,22 @@ pub fn make_app<const N: usize>(
         .subcommand(Command::new("stop").about("Stops the currently running server"))
 }
 
-#[derive(From)]
+#[derive(Deserialize)]
 pub enum BindAddress {
+    #[serde(rename = "local")]
     Local(String),
+    #[serde(rename = "network")]
     Network(SocketAddr),
 }
 
-pub struct BaseConfig<A: Into<AllowMethods>, B: Into<AllowOrigin>, C: Into<BindAddress>> {
+pub struct BaseConfig<A: Into<AllowMethods>, B: Into<AllowOrigin>> {
     pub stderr_log_path: String,
     pub routing_log_path: String,
     pub security_log_path: String,
     pub cors_allowed_methods: A,
     pub cors_allowed_origins: B,
     pub api_token: HeaderValue,
-    pub bind_address: C,
+    pub bind_address: BindAddress,
 }
 
 pub fn get_pipe_name(pipe_name_env_var: &'static str, default_pipe_name: &'static str) -> OsString {
@@ -189,19 +191,18 @@ pub async fn pre_matches<Config: DeserializeOwned>(
         .map(Option::Some)
 }
 
-pub async fn start_api<State, const N1: usize, const N2: usize, A, B, C>(
+pub async fn start_api<State, const N1: usize, const N2: usize, A, B>(
     state: State,
     app: Command,
     pipe_name: OsString,
-    config: BaseConfig<A, B, C>,
+    config: BaseConfig<A, B>,
     public_paths: [&'static str; N1],
     routes: [(&'static str, MethodRouter<State>); N2],
 ) -> Result<()>
 where
     State: Clone + Send + Sync + 'static,
     A: Into<AllowMethods>,
-    B: Into<AllowOrigin>,
-    C: Into<BindAddress>,
+    B: Into<AllowOrigin>
 {
     // Setup logger
     static CRITICAL_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
@@ -410,7 +411,7 @@ where
     }
 
     // Setup Server
-    match config.bind_address.into() {
+    match config.bind_address {
         #[cfg(unix)]
         BindAddress::Local(addr) => {
             let listener = tokio::net::UnixListener::bind(&addr)
