@@ -1,13 +1,10 @@
 #![feature(trivial_bounds)]
 #![feature(string_leak)]
 
-use std::{
-    sync::Arc,
-    time::Duration, fs::read_to_string,
-};
+use std::{fs::read_to_string, sync::Arc, time::Duration};
 
 use anyhow::{self, Context};
-use axum::{extract::FromRef, http::HeaderValue};
+use axum::{extract::FromRef, http::HeaderValue, response::Response};
 use db::DB;
 use leaderboard::Leaderboard;
 use mangle_api_core::{
@@ -84,12 +81,12 @@ async fn main() -> anyhow::Result<()> {
         .context(format!("Reading {}", config.stylesheet_path))?;
     let internal_error_page = read_to_string(&config.internal_error_path)
         .context(format!("Reading {}", config.internal_error_path))?;
-    let invalid_page = read_to_string(&config.invalid_path)
-        .context(format!("Reading {}", config.invalid_path))?;
-    let success_page = read_to_string(&config.success_path)
-        .context(format!("Reading {}", config.success_path))?;
-    let late_page = read_to_string(&config.late_path)
-        .context(format!("Reading {}", config.late_path))?;
+    let invalid_page =
+        read_to_string(&config.invalid_path).context(format!("Reading {}", config.invalid_path))?;
+    let success_page =
+        read_to_string(&config.success_path).context(format!("Reading {}", config.success_path))?;
+    let late_page =
+        read_to_string(&config.late_path).context(format!("Reading {}", config.late_path))?;
 
     let builder = aws_config::from_env();
     #[cfg(debug_assertions)]
@@ -156,13 +153,18 @@ async fn main() -> anyhow::Result<()> {
         app,
         pipe_name,
         config,
-        [
-            "^/oidc/",
-            "^/manglemix.css$"
-        ],
+        ["^/oidc/", "^/manglemix.css$"],
         [
             ("/oidc/redirect", openid_redirect()),
-            ("/manglemix.css", axum::routing::get(|| async move { css.clone() })),
+            (
+                "/manglemix.css",
+                axum::routing::get(|| async move {
+                    Response::builder()
+                        .header("Content-Type", "text/css")
+                        .body(css.clone())
+                        .unwrap()
+                }),
+            ),
             (
                 "/ws_api",
                 ws_api_route::<FirstConnectionState, SessionState, WSAPIMessage, _, _, _>(),

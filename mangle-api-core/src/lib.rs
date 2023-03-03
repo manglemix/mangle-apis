@@ -23,8 +23,8 @@ use log::{error, info, warn, LevelFilter};
 use mangle_detached_console::ConsoleServer;
 use parking_lot::Mutex;
 use regex::{Regex, RegexSet};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::read_to_string;
@@ -202,7 +202,7 @@ pub async fn start_api<State, const N1: usize, const N2: usize, A, B>(
 where
     State: Clone + Send + Sync + 'static,
     A: Into<AllowMethods>,
-    B: Into<AllowOrigin>
+    B: Into<AllowOrigin>,
 {
     // Setup logger
     static CRITICAL_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
