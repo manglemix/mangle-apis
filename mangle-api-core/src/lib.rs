@@ -8,6 +8,7 @@ pub mod auth;
 // pub mod sync;
 pub mod distributed;
 pub mod neo_api;
+pub mod webrtc;
 pub mod ws;
 
 #[cfg(any(feature = "redis"))]

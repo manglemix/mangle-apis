@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    marker::PhantomPinned,
+    mem::{take, transmute},
+    pin::Pin,
+    sync::Arc,
+    time::Instant,
+};
 
 use axum::{
     async_trait,
@@ -11,15 +17,16 @@ use mangle_api_core::{
     log::{error, warn},
     neo_api::{APIConnectionManager, APIMessage, ConnectionLock},
     serde_json,
+    webrtc::{ICECandidate, JoinSessionError, SDPAnswer, SDPOffer, SDPOfferStream, ConnectionReceiver},
     ws::{ManagedWebSocket, WebSocketCode},
 };
 use rustrict::CensorStr;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::select;
 
 use crate::{
-    db::UserProfile, leaderboard::LeaderboardEntry, tournament::TournamentData, GlobalState,
-    LoginTokenConfig, LoginTokenData,
+    db::UserProfile, leaderboard::LeaderboardEntry, multiplayer::RoomCode,
+    tournament::TournamentData, GlobalState, LoginTokenConfig, LoginTokenData,
 };
 use std::ops::Deref;
 pub struct FirstConnectionState {
@@ -31,6 +38,48 @@ struct LoggedIn {
     login_token: VerifiedToken<LoginTokenConfig>,
     _conn_lock: ConnectionLock<Arc<String>>,
 }
+
+
+async fn webrtc_handle(mut ws: ManagedWebSocket, handle: &mut ConnectionReceiver) -> Option<ManagedWebSocket> {
+    let mut opt_ws = Some(ws);
+
+    loop {
+        select! {
+            opt = handle.wait_for_conn() => {
+                ws = opt_ws.unwrap();
+                let Some(SDPOfferStream { sdp_offer, answer_stream }) = opt else {
+                    return ws.send("Room closed")
+                };
+                ws = ws.send(sdp_offer.0)?;
+
+                let (tmp_ws, msg) = ws.recv().await?;
+                ws = tmp_ws;
+
+                let Message::Text(msg) = msg else { return ws.send("Bad Message") };
+                if msg == "Cancel" {
+                    return ws.send("Unhosted");
+                }
+                let Ok(msg) = WSAPIMessage::try_from(msg) else {
+                    return ws.send("Bad Message")
+                };
+                let WSAPIMessageImpl::SDPAnswer { sdp_answer, ice_candidate } = msg.msg else {
+                    return ws.send("Bad Message")
+                };
+                let ice_recv = answer_stream.send_answer(sdp_answer.into(), ice_candidate.into());
+                let ice = ice_recv.get_ice().await;
+
+                ws = ws.send(ice.0)?;
+
+                opt_ws = Some(ws);
+            }
+            opt = ManagedWebSocket::option_recv(&mut opt_ws) => {
+                opt.as_ref()?;  // Return if None
+                break opt_ws.unwrap().send("Unhosted")
+            }
+        }
+    }
+}
+
 
 pub struct SessionState {
     globals: GlobalState,
@@ -71,6 +120,10 @@ where
     }
 }
 
+fn default_lobby_size() -> usize {
+    4
+}
+
 #[derive(Deserialize)]
 enum WSAPIMessageImpl<'a> {
     ScoreUpdateRequest {
@@ -83,24 +136,45 @@ enum WSAPIMessageImpl<'a> {
     Login,
     GetTournament,
     WinTournament,
+    HostSession {
+        #[serde(default = "default_lobby_size")]
+        max_size: usize,
+    },
+    StartJoinSession(
+        // session code
+        u16,
+    ),
+    JoinSessionSDPOffers(Vec<String>),
+    JoinSessionICE {
+        index: usize,
+        ice: String,
+    },
+    SDPAnswer {
+        sdp_answer: String,
+        ice_candidate: String,
+    },
 }
 
 pub struct WSAPIMessage {
-    _data: Box<str>,
+    // str will not move, thus making this self referential struct safe
+    _data: Pin<Box<(PhantomPinned, str)>>,
     msg: WSAPIMessageImpl<'static>,
 }
 
 impl TryFrom<String> for WSAPIMessage {
     type Error = String;
 
-    fn try_from(mut value: String) -> Result<Self, Self::Error> {
-        value.shrink_to_fit();
-        let data_ref = value.leak();
-        let data = unsafe { Box::from_raw(data_ref) };
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let data = value.into_boxed_str();
+        let data: Pin<Box<(PhantomPinned, str)>> = unsafe { transmute(data) };
 
         Ok(Self {
+            // SAFETY: Ref to data will live for as long as this struct exists,
+            // and the data will not be modified
+            // This transmute makes the lifetimes work
+            msg: serde_json::from_str(unsafe { transmute(data.deref()) })
+                .map_err(|_| "Bad Request")?,
             _data: data,
-            msg: serde_json::from_str(data_ref).map_err(|_| "Bad Request")?,
         })
     }
 }
@@ -153,9 +227,10 @@ impl APIMessage for WSAPIMessage {
     async fn route(
         self,
         session_state: &mut Self::SessionState,
-        ws: ManagedWebSocket,
+        mut ws: ManagedWebSocket,
     ) -> Option<ManagedWebSocket> {
         let leaderboard = &session_state.globals.leaderboard;
+        let multiplayer = &session_state.globals.multiplayer;
 
         macro_rules! check_login {
             () => {{
@@ -291,6 +366,114 @@ impl APIMessage for WSAPIMessage {
                     ws.send("Success")
                 }
             }
+            WSAPIMessageImpl::HostSession { max_size } => {
+                let (mut handle, code) = multiplayer.host_session_random_id(max_size);
+                ws = ws.send(code.to_string())?;
+
+                webrtc_handle(ws, &mut handle).await
+            }
+            WSAPIMessageImpl::StartJoinSession(code) => {
+                let Ok(code) = RoomCode::try_from(code) else {
+                    return ws.send("Bad code")
+                };
+                let mut offer_sender = match multiplayer.join_session(&code) {
+                    Ok(x) => x,
+                    Err(JoinSessionError::Full) => return ws.send("Room Full"),
+                    Err(JoinSessionError::NotFound) => return ws.send("Not Found"),
+                };
+
+                let member_count = offer_sender.get_member_count();
+                ws = ws.send(member_count.to_string())?;
+
+                let (mut handle, mut answer_streams) = loop {
+                    let (tmp_ws, msg) = ws.recv().await?;
+                    ws = tmp_ws;
+
+                    let Message::Text(msg) = msg else { return ws.send("Bad Message") };
+                    if msg == "Cancel" {
+                        return ws.send("Cancelled");
+                    }
+                    let Ok(msg) = WSAPIMessage::try_from(msg) else {
+                        return ws.send("Bad Message")
+                    };
+                    let WSAPIMessageImpl::JoinSessionSDPOffers(offers) = msg.msg else {
+                        return ws.send("Bad Message")
+                    };
+                    match offer_sender
+                        .send_sdp_offers(offers.into_iter().map(SDPOffer::from).collect())
+                        .await
+                    {
+                        Ok(x) => break x,
+                        Err((tmp_offer_sender, _)) => {
+                            offer_sender = tmp_offer_sender;
+                            continue;
+                        }
+                    }
+                };
+
+                let mut ice_senders = Vec::with_capacity(member_count);
+
+                for _ in 0..member_count {
+                    ice_senders.push(None);
+                }
+
+                while let Some((index, SDPAnswer(sdp_answer), ICECandidate(ice), ice_sender)) =
+                    answer_streams.wait_for_an_answer().await
+                {
+                    #[derive(Serialize)]
+                    struct AnswerJSON {
+                        index: usize,
+                        sdp_answer: String,
+                        ice: String,
+                    }
+                    *ice_senders.get_mut(index).unwrap() = Some(ice_sender);
+                    ws = ws.send(
+                        serde_json::to_string(&AnswerJSON {
+                            index,
+                            sdp_answer,
+                            ice,
+                        })
+                        .unwrap(),
+                    )?;
+                }
+
+                let mut remaining = member_count;
+                while remaining > 0 {
+                    let (tmp_ws, msg) = ws.recv().await?;
+                    ws = tmp_ws;
+
+                    let Message::Text(msg) = msg else {
+                        ws = ws.send("Bad Message")?;
+                        continue
+                    };
+                    if msg == "Cancel" {
+                        return ws.send("Cancelled");
+                    }
+                    let Ok(msg) = WSAPIMessage::try_from(msg) else {
+                        ws = ws.send("Bad Message")?;
+                        continue
+                    };
+                    let Ok(msg) = WSAPIMessage::try_from(msg) else {
+                        ws = ws.send("Bad Message")?;
+                        continue
+                    };
+                    let WSAPIMessageImpl::JoinSessionICE{ index, ice } = msg.msg else {
+                        ws = ws.send("Bad Message")?;
+                        continue
+                    };
+                    let Some(ice_sender) = take(ice_senders.get_mut(index).unwrap()) else {
+                        ws = ws.send("Already sent")?;
+                        continue
+                    };
+                    remaining -= 1;
+                    ice_sender.send(ice.into()).await;
+                }
+                
+                webrtc_handle(ws, &mut handle).await
+            }
+            WSAPIMessageImpl::JoinSessionSDPOffers(_)
+            | WSAPIMessageImpl::JoinSessionICE { .. }
+            | WSAPIMessageImpl::SDPAnswer { .. } => ws.send("Must be in session"),
         }
     }
 }

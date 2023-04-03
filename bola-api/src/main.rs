@@ -1,5 +1,7 @@
 #![feature(trivial_bounds)]
 #![feature(string_leak)]
+#![feature(map_try_insert)]
+#![feature(vec_push_within_capacity)]
 
 use std::{fs::read_to_string, sync::Arc, time::Duration};
 
@@ -21,11 +23,13 @@ use mangle_api_core::{
     neo_api::{ws_api_route, APIConnectionManager},
     pre_matches, start_api, BaseConfig,
 };
+use multiplayer::Multiplayer;
 use tokio::{self};
 
 mod config;
 mod db;
 mod leaderboard;
+mod multiplayer;
 mod network;
 mod tournament;
 mod ws_api;
@@ -65,6 +69,7 @@ struct GlobalState {
     leaderboard: Leaderboard,
     api_conn_manager: APIConnectionManager<Arc<String>>,
     tournament: Tournament,
+    multiplayer: Multiplayer,
 }
 
 #[tokio::main]
@@ -118,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         api_conn_manager: APIConnectionManager::new(WS_PING_DELAY),
         tournament: Tournament::new(config.start_week_time),
+        multiplayer: Multiplayer::default(),
     };
 
     let config = BaseConfig {
