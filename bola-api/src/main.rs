@@ -19,9 +19,9 @@ use mangle_api_core::{
         token::{HeaderTokenGranterConfig, TokenGranter, TokenGranterConfig},
     },
     distributed::Node,
-    get_pipe_name, make_app,
+    get_https_credentials, get_pipe_name, make_app,
     neo_api::{ws_api_route, APIConnectionManager},
-    pre_matches, start_api, BaseConfig,
+    pre_matches, setup_logger, start_api, BaseConfig,
 };
 use multiplayer::Multiplayer;
 use tokio::{self};
@@ -82,6 +82,21 @@ async fn main() -> anyhow::Result<()> {
         return Ok(())
     };
 
+    let https_der = if config.https {
+        Some(
+            get_https_credentials(
+                &config.bind_address,
+                "h28u9dj8**3J9(j#u(#hn",
+                &config.https_der_path,
+                "shabouza030@gmail.com".into(),
+                "manglemix.com".into(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     let css = read_to_string(&config.stylesheet_path)
         .context(format!("Reading {}", config.stylesheet_path))?;
     let internal_error_page = read_to_string(&config.internal_error_path)
@@ -100,7 +115,12 @@ async fn main() -> anyhow::Result<()> {
 
     let oidc_state = OIDCState::default();
 
-    let node = Node::new(config.sibling_domains, config.network_port, None).await?;
+    let node = Node::new(
+        config.sibling_domains,
+        config.network_port,
+        https_der.clone(),
+    )
+    .await?;
     let db = DB::new(&aws_config, config.bola_profiles_table);
 
     let state = GlobalState {
@@ -154,6 +174,8 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
+    setup_logger(&config)?;
+
     start_api(
         state,
         app,
@@ -176,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
                 ws_api_route::<FirstConnectionState, SessionState, WSAPIMessage, _, _, _>(),
             ),
         ],
+        https_der,
     )
     .await
 }

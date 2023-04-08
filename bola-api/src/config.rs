@@ -42,6 +42,11 @@ pub struct Config {
     pub success_path: String,
     #[serde(default = "late_path")]
     pub late_path: String,
+
+    #[serde(default = "Default::default")]
+    pub https: bool,
+    #[serde(default = "https_der_path")]
+    pub https_der_path: String,
 }
 
 fn stderr_log() -> String {
@@ -83,4 +88,8 @@ fn success_path() -> String {
 
 fn late_path() -> String {
     "late.html".into()
+}
+
+fn https_der_path() -> String {
+    "./https/der.p12".into()
 }

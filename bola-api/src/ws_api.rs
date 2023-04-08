@@ -17,7 +17,9 @@ use mangle_api_core::{
     log::{error, warn},
     neo_api::{APIConnectionManager, APIMessage, ConnectionLock},
     serde_json,
-    webrtc::{ICECandidate, JoinSessionError, SDPAnswer, SDPOffer, SDPOfferStream, ConnectionReceiver},
+    webrtc::{
+        ConnectionReceiver, ICECandidate, JoinSessionError, SDPAnswer, SDPOffer, SDPOfferStream,
+    },
     ws::{ManagedWebSocket, WebSocketCode},
 };
 use rustrict::CensorStr;
@@ -39,8 +41,10 @@ struct LoggedIn {
     _conn_lock: ConnectionLock<Arc<String>>,
 }
 
-
-async fn webrtc_handle(mut ws: ManagedWebSocket, handle: &mut ConnectionReceiver) -> Option<ManagedWebSocket> {
+async fn webrtc_handle(
+    mut ws: ManagedWebSocket,
+    handle: &mut ConnectionReceiver,
+) -> Option<ManagedWebSocket> {
     let mut opt_ws = Some(ws);
 
     loop {
@@ -79,7 +83,6 @@ async fn webrtc_handle(mut ws: ManagedWebSocket, handle: &mut ConnectionReceiver
         }
     }
 }
-
 
 pub struct SessionState {
     globals: GlobalState,
@@ -468,7 +471,7 @@ impl APIMessage for WSAPIMessage {
                     remaining -= 1;
                     ice_sender.send(ice.into()).await;
                 }
-                
+
                 webrtc_handle(ws, &mut handle).await
             }
             WSAPIMessageImpl::JoinSessionSDPOffers(_)

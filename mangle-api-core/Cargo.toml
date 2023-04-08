@@ -19,6 +19,8 @@ tower = { version = "0.4.13" }
 tower-http = { version = "0.3.5", features = ["cors", "compression-gzip", "compression-br", "trace", "auth"] }
 axum = { workspace = true }
 
+lers = { version = "0.4.0", features = ["http-01"] }
+
 serde = { workspace = true }
 toml = "0.5.10"
 serde_json = "1.0.91"

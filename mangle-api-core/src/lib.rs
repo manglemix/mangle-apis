@@ -8,6 +8,7 @@ pub mod auth;
 // pub mod sync;
 pub mod distributed;
 pub mod neo_api;
+pub mod tls;
 pub mod webrtc;
 pub mod ws;
 
@@ -17,6 +18,8 @@ pub mod db;
 use anyhow::{Context, Error, Result};
 use clap::builder::IntoResettable;
 use clap::{arg, Command};
+use lers::solver::Http01Solver;
+use lers::{Directory, LETS_ENCRYPT_STAGING_URL};
 use mangle_detached_console::{send_message, ConsoleSendError};
 
 use fern::{log_file, Dispatch};
@@ -28,9 +31,12 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::fs::read_to_string;
+use std::fs::{read_to_string, File};
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::spawn;
+use tokio_native_tls::native_tls::Identity;
 use toml::from_str;
 use tower::ServiceBuilder;
 use tower_http::cors::{AllowMethods, AllowOrigin};
@@ -52,9 +58,17 @@ pub use serde_json;
 pub use toml;
 pub use tower_http;
 
+use crate::tls::TlsAcceptor;
+
 mod log_targets {
     pub const SECURITY: &str = "suspicious_security";
 }
+const ROUTING_REGEX_RAW: &str = "^(tower_http::trace|hyper::proto|mio|tracing)";
+
+// Setup logger
+static CRITICAL_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
+static STDERR_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
+static ROUTING_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
 
 pub fn make_app<const N: usize>(
     name: &'static str,
@@ -192,28 +206,12 @@ pub async fn pre_matches<Config: DeserializeOwned>(
         .map(Option::Some)
 }
 
-pub async fn start_api<State, const N1: usize, const N2: usize, A, B>(
-    state: State,
-    app: Command,
-    pipe_name: OsString,
-    config: BaseConfig<A, B>,
-    public_paths: [&'static str; N1],
-    routes: [(&'static str, MethodRouter<State>); N2],
-) -> Result<()>
+pub fn setup_logger<A, B>(config: &BaseConfig<A, B>) -> Result<()>
 where
-    State: Clone + Send + Sync + 'static,
     A: Into<AllowMethods>,
     B: Into<AllowOrigin>,
 {
-    // Setup logger
-    static CRITICAL_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
-    static STDERR_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
-    static ROUTING_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
-
-    const ROUTING_REGEX_RAW: &str = "^(tower_http::trace|hyper::proto|mio|tracing)";
-
     let routing_regex = Regex::new(ROUTING_REGEX_RAW).unwrap();
-
     let non_stderr = Arc::new(
         RegexSet::new([
             ROUTING_REGEX_RAW.to_string(),
@@ -221,7 +219,6 @@ where
         ])
         .unwrap(),
     );
-
     let non_stderr2 = non_stderr.clone();
 
     Dispatch::new()
@@ -281,8 +278,95 @@ where
                         .context(format!("Opening {:?}", config.security_log_path))?,
                 ),
         )
-        .apply()?;
+        .apply()
+        .context("Setting up logger")?;
+    Ok(())
+}
 
+pub async fn get_https_credentials(
+    bind_address: &BindAddress,
+    password: &str,
+    https_der_path: &str,
+    https_email: String,
+    https_domain: String,
+) -> Result<Identity> {
+    let mut der = vec![];
+
+    match File::open(https_der_path) {
+        Ok(mut file) => {
+            file.read_to_end(&mut der)
+                .context(format!("Reading {}", https_der_path))?;
+        }
+        Err(e) => match e.kind() {
+            std::io::ErrorKind::NotFound => {}
+            _ => return Err(e).context(format!("Reading {}", https_der_path)),
+        },
+    }
+
+    if der.is_empty() {
+        if let BindAddress::Network(address) = bind_address {
+            let solver = Http01Solver::new();
+            let handle = solver.start(address)?;
+
+            // Create a new directory for Let's Encrypt Staging
+            let directory = Directory::builder(LETS_ENCRYPT_STAGING_URL)
+                .http01_solver(Box::new(solver))
+                .build()
+                .await?;
+
+            // Create an ACME account to order your certificate. In production, you should store
+            // the private key, so you can renew your certificate.
+            let account = directory
+                .account()
+                .terms_of_service_agreed(true)
+                .contacts(vec![format!("mailto:{https_email}")])
+                .create_if_not_exists()
+                .await?;
+
+            // Obtain your certificate
+            let certificate = account
+                .certificate()
+                .add_domain(https_domain)
+                .obtain()
+                .await?;
+
+            spawn(async {
+                let Err(e) = handle.stop().await else { return };
+                error!("Error while stopping ACME handle: {:?}", e);
+            });
+
+            der = certificate
+                .fullchain_to_der()
+                .context("Converting certificate to der")?;
+
+            File::create(https_der_path)
+                .context(format!("Reading {}", https_der_path))?
+                .write_all(&der)
+                .context(format!("Writing to {}", https_der_path))?;
+        } else {
+            return Err(Error::msg(
+                "Failed to replace missing credentials as we are binded locally",
+            ));
+        }
+    }
+
+    Identity::from_pkcs12(&der, password).context("Loading HTTPS Credentials")
+}
+
+pub async fn start_api<State, const N1: usize, const N2: usize, A, B>(
+    state: State,
+    app: Command,
+    pipe_name: OsString,
+    config: BaseConfig<A, B>,
+    public_paths: [&'static str; N1],
+    routes: [(&'static str, MethodRouter<State>); N2],
+    https_der: Option<Identity>,
+) -> Result<()>
+where
+    State: Clone + Send + Sync + 'static,
+    A: Into<AllowMethods>,
+    B: Into<AllowOrigin>,
+{
     // Setup Console Server
     let mut console_server = ConsoleServer::bind(&pipe_name).context("Starting ConsoleServer")?;
 
@@ -401,9 +485,6 @@ where
             // Only print criticals from now on
             *CRITICAL_LOG_LEVEL.lock() = LevelFilter::Error;
 
-            // Free some memory
-            drop(pipe_name);
-
             server
                 .await
                 .map_err(Into::<Error>::into)
@@ -427,7 +508,16 @@ where
             return Err(Error::msg("Local Sockets are only supported on Unix"))
         }
         BindAddress::Network(addr) => {
-            run!(Server::bind(&addr), addr);
+            if let Some(identity) = https_der {
+                run!(
+                    Server::builder(
+                        TlsAcceptor::new(identity, &addr).context("Initializing https")?
+                    ),
+                    addr
+                );
+            } else {
+                run!(Server::bind(&addr), addr);
+            }
         }
     };
 
