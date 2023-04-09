@@ -6,7 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# tokio = { version = "1.23.0", features = ["rt", "signal", "macros", "net", "rt-multi-thread"] }
 tokio = { workspace = true }
 tokio-stream = { version = "0.1.11", features = ["net"] }
 tokio-native-tls = "0.3.1"

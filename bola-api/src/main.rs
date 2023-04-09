@@ -21,7 +21,7 @@ use mangle_api_core::{
     distributed::Node,
     get_https_credentials, get_pipe_name, make_app,
     neo_api::{ws_api_route, APIConnectionManager},
-    pre_matches, setup_logger, start_api, BaseConfig,
+    pre_matches, setup_logger, start_api, BaseConfig, log::info,
 };
 use multiplayer::Multiplayer;
 use tokio::{self};
@@ -82,17 +82,24 @@ async fn main() -> anyhow::Result<()> {
         return Ok(())
     };
 
+    setup_logger(&config.stderr_log, &config.routing_log, &config.security_log)?;
+
     let https_der = if config.https {
-        Some(
+        if config.https_domain.is_empty() {
+            return Err(anyhow::Error::msg("https is true, but https_domain is empty"))
+        }
+        let tmp = Some(
             get_https_credentials(
-                &config.bind_address,
-                "h28u9dj8**3J9(j#u(#hn",
-                &config.https_der_path,
+                config.bind_address.clone(),
+                &config.certs_path,
+                &config.key_path,
                 "shabouza030@gmail.com".into(),
-                "manglemix.com".into(),
+                config.https_domain,
             )
             .await?,
-        )
+        );
+        info!("HTTPS certificates loaded successfully");
+        tmp
     } else {
         None
     };
@@ -149,9 +156,6 @@ async fn main() -> anyhow::Result<()> {
     let config = BaseConfig {
         api_token: HeaderValue::from_str(&config.api_token).context("parsing api_token")?,
         bind_address: config.bind_address,
-        stderr_log_path: config.stderr_log,
-        routing_log_path: config.routing_log,
-        security_log_path: config.security_log,
         cors_allowed_methods: {
             let mut out = Vec::new();
 
@@ -173,8 +177,6 @@ async fn main() -> anyhow::Result<()> {
             out
         },
     };
-
-    setup_logger(&config)?;
 
     start_api(
         state,

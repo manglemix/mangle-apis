@@ -45,8 +45,12 @@ pub struct Config {
 
     #[serde(default = "Default::default")]
     pub https: bool,
-    #[serde(default = "https_der_path")]
-    pub https_der_path: String,
+    #[serde(default = "Default::default")]
+    pub https_domain: String,
+    #[serde(default = "certs_path")]
+    pub certs_path: String,
+    #[serde(default = "key_path")]
+    pub key_path: String,
 }
 
 fn stderr_log() -> String {
@@ -90,6 +94,10 @@ fn late_path() -> String {
     "late.html".into()
 }
 
-fn https_der_path() -> String {
-    "./https/der.p12".into()
+fn certs_path() -> String {
+    "https/certs.pem".into()
+}
+
+fn key_path() -> String {
+    "https/key.pem".into()
 }

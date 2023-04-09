@@ -10,7 +10,7 @@ use futures::{future::BoxFuture, Future};
 use hyper::server::{accept::Accept, conn::AddrIncoming};
 use tokio::{
     net::TcpStream,
-    sync::mpsc::{channel, error::TrySendError, Receiver, Sender},
+    sync::mpsc::{channel, error::{TrySendError, TryRecvError}, Receiver, Sender},
 };
 use tokio_native_tls::{
     native_tls::{Identity, TlsAcceptor as InnerTlsAcceptor},
@@ -75,6 +75,10 @@ impl<'a> Accept for TlsAcceptor<'a> {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut task::Context<'_>,
     ) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
+        if let Poll::Ready(_) = Pin::new(&mut self.acceptor_loop).poll(cx) {
+            unreachable!()
+        }
+
         if let Some(stream) = take(&mut self.pending_send) {
             if let Err(e) = self.conn_sender.try_send(stream) {
                 let TrySendError::Full(stream) = e else {
@@ -85,18 +89,16 @@ impl<'a> Accept for TlsAcceptor<'a> {
         }
 
         if self.accepting {
-            if let Poll::Ready(_) = Pin::new(&mut self.acceptor_loop).poll(cx) {
-                unreachable!()
-            }
-
-            return match Pin::new(&mut self.result_recv).poll_recv(cx) {
-                Poll::Ready(Some(x)) => {
+            return match self.result_recv.try_recv() {
+                Ok(x) => {
                     self.accepting = false;
                     Poll::Ready(Some(x.map_err(Into::into)))
                 }
-                Poll::Ready(None) => unreachable!(),
-                Poll::Pending => Poll::Pending,
-            };
+                Err(e) => match e {
+                    TryRecvError::Empty => Poll::Pending,
+                    TryRecvError::Disconnected => unreachable!(),
+                }
+            }
         }
 
         let stream = match Pin::new(&mut self.incoming).poll_accept(cx) {

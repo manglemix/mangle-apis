@@ -35,7 +35,6 @@ use std::fs::{read_to_string, File};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::spawn;
 use tokio_native_tls::native_tls::Identity;
 use toml::from_str;
 use tower::ServiceBuilder;
@@ -105,7 +104,7 @@ pub fn make_app<const N: usize>(
         .subcommand(Command::new("stop").about("Stops the currently running server"))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub enum BindAddress {
     #[serde(rename = "local")]
     Local(String),
@@ -114,9 +113,6 @@ pub enum BindAddress {
 }
 
 pub struct BaseConfig<A: Into<AllowMethods>, B: Into<AllowOrigin>> {
-    pub stderr_log_path: String,
-    pub routing_log_path: String,
-    pub security_log_path: String,
     pub cors_allowed_methods: A,
     pub cors_allowed_origins: B,
     pub api_token: HeaderValue,
@@ -206,10 +202,7 @@ pub async fn pre_matches<Config: DeserializeOwned>(
         .map(Option::Some)
 }
 
-pub fn setup_logger<A, B>(config: &BaseConfig<A, B>) -> Result<()>
-where
-    A: Into<AllowMethods>,
-    B: Into<AllowOrigin>,
+pub fn setup_logger(stderr_log_path: &str, routing_log_path: &str, security_log_path: &str) -> Result<()>
 {
     let routing_regex = Regex::new(ROUTING_REGEX_RAW).unwrap();
     let non_stderr = Arc::new(
@@ -253,8 +246,8 @@ where
                         && metadata.level() <= *STDERR_LOG_LEVEL.lock()
                 })
                 .chain(
-                    log_file(&config.stderr_log_path)
-                        .context(format!("Opening {:?}", config.stderr_log_path))?,
+                    log_file(stderr_log_path)
+                        .context(format!("Opening {:?}", stderr_log_path))?,
                 ),
         )
         // Routing to file
@@ -265,8 +258,8 @@ where
                         && metadata.level() <= *ROUTING_LOG_LEVEL.lock()
                 })
                 .chain(
-                    log_file(&config.routing_log_path)
-                        .context(format!("Opening {:?}", config.routing_log_path))?,
+                    log_file(routing_log_path)
+                        .context(format!("Opening {:?}", routing_log_path))?,
                 ),
         )
         // Suspicious security to file (maybe more?)
@@ -274,8 +267,8 @@ where
             Dispatch::new()
                 .filter(|metadata| metadata.target().starts_with(log_targets::SECURITY))
                 .chain(
-                    log_file(&config.security_log_path)
-                        .context(format!("Opening {:?}", config.security_log_path))?,
+                    log_file(security_log_path)
+                        .context(format!("Opening {:?}", security_log_path))?,
                 ),
         )
         .apply()
@@ -284,35 +277,50 @@ where
 }
 
 pub async fn get_https_credentials(
-    bind_address: &BindAddress,
-    password: &str,
-    https_der_path: &str,
+    bind_address: BindAddress,
+    certs_path: &str,
+    key_path: &str,
     https_email: String,
     https_domain: String,
 ) -> Result<Identity> {
-    let mut der = vec![];
+    let mut certs = vec![];
+    let mut key = vec![];
 
-    match File::open(https_der_path) {
+    match File::open(certs_path) {
         Ok(mut file) => {
-            file.read_to_end(&mut der)
-                .context(format!("Reading {}", https_der_path))?;
+            file.read_to_end(&mut certs)
+                .context(format!("Reading {}", certs_path))?;
         }
         Err(e) => match e.kind() {
             std::io::ErrorKind::NotFound => {}
-            _ => return Err(e).context(format!("Reading {}", https_der_path)),
+            _ => return Err(e).context(format!("Opening {}", certs_path)),
+        },
+    }
+    match File::open(key_path) {
+        Ok(mut file) => {
+            file.read_to_end(&mut key)
+                .context(format!("Reading {}", key_path))?;
+        }
+        Err(e) => match e.kind() {
+            std::io::ErrorKind::NotFound => {}
+            _ => return Err(e).context(format!("Opening {}", key_path)),
         },
     }
 
-    if der.is_empty() {
-        if let BindAddress::Network(address) = bind_address {
+    if certs.is_empty() {
+        warn!("No certs were found, obtaining...");
+        if let BindAddress::Network(mut address) = bind_address {
             let solver = Http01Solver::new();
-            let handle = solver.start(address)?;
+            address.set_port(80);
+            let handle = solver.start(&address)
+                .context(format!("Binding ACME solver to {address}"))?;
 
-            // Create a new directory for Let's Encrypt Staging
+            // Create a new directory for Let's Encrypt Production
             let directory = Directory::builder(LETS_ENCRYPT_STAGING_URL)
                 .http01_solver(Box::new(solver))
                 .build()
-                .await?;
+                .await
+                .context("Building ACME directory")?;
 
             // Create an ACME account to order your certificate. In production, you should store
             // the private key, so you can renew your certificate.
@@ -321,28 +329,39 @@ pub async fn get_https_credentials(
                 .terms_of_service_agreed(true)
                 .contacts(vec![format!("mailto:{https_email}")])
                 .create_if_not_exists()
-                .await?;
-
+                .await
+                .context("Creating ACME account")?;
+            
             // Obtain your certificate
             let certificate = account
                 .certificate()
                 .add_domain(https_domain)
                 .obtain()
-                .await?;
+                .await
+                .context("Collecting certificate")?;
 
-            spawn(async {
-                let Err(e) = handle.stop().await else { return };
-                error!("Error while stopping ACME handle: {:?}", e);
-            });
+            handle
+                .stop()
+                .await
+                .context("Stopping ACME handle")?;
 
-            der = certificate
-                .fullchain_to_der()
-                .context("Converting certificate to der")?;
+            certs = certificate
+                .fullchain_to_pem()
+                .context("Converting certificate to pem")?;
 
-            File::create(https_der_path)
-                .context(format!("Reading {}", https_der_path))?
-                .write_all(&der)
-                .context(format!("Writing to {}", https_der_path))?;
+            key = certificate
+                .private_key_to_pem()
+                .context("Converting private key to pem")?;
+
+            File::create(certs_path)
+                .context(format!("Opening {}", certs_path))?
+                .write_all(&certs)
+                .context(format!("Writing to {}", certs_path))?;
+
+            File::create(key_path)
+                .context(format!("Opening {}", key_path))?
+                .write_all(&key)
+                .context(format!("Writing to {}", key_path))?;
         } else {
             return Err(Error::msg(
                 "Failed to replace missing credentials as we are binded locally",
@@ -350,7 +369,7 @@ pub async fn get_https_credentials(
         }
     }
 
-    Identity::from_pkcs12(&der, password).context("Loading HTTPS Credentials")
+    Identity::from_pkcs8(&certs, &key).context("Loading HTTPS Credentials")
 }
 
 pub async fn start_api<State, const N1: usize, const N2: usize, A, B>(
@@ -392,6 +411,8 @@ where
             ))),
     );
 
+    let startup_msg = std::cell::RefCell::new(String::new());
+
     // Setup side functionality
     let mut final_event = None;
     let fut = async {
@@ -404,6 +425,12 @@ where
                 }
             }
             () = async {
+                info!("{}", startup_msg.borrow());
+                *startup_msg.borrow_mut() = String::new();
+    
+                // Only print criticals from now on
+                *CRITICAL_LOG_LEVEL.lock() = LevelFilter::Error;
+
                 loop {
                     let mut event = match console_server.accept().await {
                         Ok(x) => x,
@@ -476,16 +503,10 @@ where
 
     macro_rules! run {
         ($server: expr, $addr: expr) => {
-            let server = $server
+            *startup_msg.borrow_mut() = format!("Binded to {}", $addr);
+            $server
                 .serve(router.into_make_service())
-                .with_graceful_shutdown(fut);
-
-            info!("Binded to {:?}", $addr);
-
-            // Only print criticals from now on
-            *CRITICAL_LOG_LEVEL.lock() = LevelFilter::Error;
-
-            server
+                .with_graceful_shutdown(fut)
                 .await
                 .map_err(Into::<Error>::into)
                 .context("Running the web server")?;
@@ -509,6 +530,9 @@ where
         }
         BindAddress::Network(addr) => {
             if let Some(identity) = https_der {
+                if addr.port() != 443 {
+                    warn!("Serving HTTPS on a different than 443")
+                }
                 run!(
                     Server::builder(
                         TlsAcceptor::new(identity, &addr).context("Initializing https")?
