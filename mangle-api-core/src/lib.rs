@@ -1,11 +1,11 @@
 #![feature(string_leak)]
+#![feature(never_type)]
 
 use axum::http::HeaderValue;
 use axum::routing::MethodRouter;
 use axum::{Router, Server};
 
 pub mod auth;
-// pub mod sync;
 pub mod distributed;
 pub mod neo_api;
 pub mod tls;
@@ -19,7 +19,7 @@ use anyhow::{Context, Error, Result};
 use clap::builder::IntoResettable;
 use clap::{arg, Command};
 use lers::solver::Http01Solver;
-use lers::{Directory, LETS_ENCRYPT_STAGING_URL};
+use lers::{Directory, LETS_ENCRYPT_PRODUCTION_URL};
 use mangle_detached_console::{send_message, ConsoleSendError};
 
 use fern::{log_file, Dispatch};
@@ -62,7 +62,7 @@ use crate::tls::TlsAcceptor;
 mod log_targets {
     pub const SECURITY: &str = "suspicious_security";
 }
-const ROUTING_REGEX_RAW: &str = "^(tower_http::trace|hyper::proto|mio|tracing)";
+const ROUTING_REGEX_RAW: &str = "^(tower_http::trace|hyper::proto|mio|tracing|routing)";
 
 // Setup logger
 static CRITICAL_LOG_LEVEL: Mutex<LevelFilter> = Mutex::new(LevelFilter::Info);
@@ -316,7 +316,7 @@ pub async fn get_https_credentials(
                 .context(format!("Binding ACME solver to {address}"))?;
 
             // Create a new directory for Let's Encrypt Production
-            let directory = Directory::builder(LETS_ENCRYPT_STAGING_URL)
+            let directory = Directory::builder(LETS_ENCRYPT_PRODUCTION_URL)
                 .http01_solver(Box::new(solver))
                 .build()
                 .await
@@ -340,11 +340,6 @@ pub async fn get_https_credentials(
                 .await
                 .context("Collecting certificate")?;
 
-            handle
-                .stop()
-                .await
-                .context("Stopping ACME handle")?;
-
             certs = certificate
                 .fullchain_to_pem()
                 .context("Converting certificate to pem")?;
@@ -352,6 +347,11 @@ pub async fn get_https_credentials(
             key = certificate
                 .private_key_to_pem()
                 .context("Converting private key to pem")?;
+
+            handle
+                .stop()
+                .await
+                .context("Stopping ACME handle")?;
 
             File::create(certs_path)
                 .context(format!("Opening {}", certs_path))?

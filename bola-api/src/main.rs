@@ -6,7 +6,7 @@
 use std::{fs::read_to_string, sync::Arc, time::Duration};
 
 use anyhow::{self, Context};
-use axum::{extract::FromRef, http::HeaderValue, response::Response};
+use axum::{extract::FromRef, http::{HeaderValue, StatusCode}, response::Response};
 use db::DB;
 use leaderboard::Leaderboard;
 use mangle_api_core::{
@@ -183,7 +183,7 @@ async fn main() -> anyhow::Result<()> {
         app,
         pipe_name,
         config,
-        ["^/oidc/", "^/manglemix.css$"],
+        ["^/oidc/", "^/manglemix.css$", "^/$"],
         [
             ("/oidc/redirect", openid_redirect()),
             (
@@ -198,6 +198,16 @@ async fn main() -> anyhow::Result<()> {
             (
                 "/ws_api",
                 ws_api_route::<FirstConnectionState, SessionState, WSAPIMessage, _, _, _>(),
+            ),
+            (
+                "/",
+                axum::routing::get(|| async move {
+                    Response::builder()
+                        .header("Location", "https://bola.manglemix.com")
+                        .status(StatusCode::TEMPORARY_REDIRECT)
+                        .body(String::new())
+                        .unwrap()
+                })
             ),
         ],
         https_der,
