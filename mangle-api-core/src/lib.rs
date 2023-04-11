@@ -1,5 +1,6 @@
 #![feature(string_leak)]
 #![feature(never_type)]
+#![feature(associated_type_bounds)]
 
 use axum::http::HeaderValue;
 use axum::routing::MethodRouter;
@@ -17,23 +18,25 @@ pub mod db;
 
 use anyhow::{Context, Error, Result};
 use clap::builder::IntoResettable;
-use clap::{arg, Command};
+use clap::{arg, ArgMatches, Command};
+use futures::Future;
 use lers::solver::Http01Solver;
 use lers::{Directory, LETS_ENCRYPT_PRODUCTION_URL};
-use mangle_detached_console::{send_message, ConsoleSendError};
+use messagist::pipes::{start_connection, start_listener, ListenerError, ToLocalSocketName};
+use messagist::{MessageHandler, MessageStream, RecvError};
+// use mangle_detached_console::{send_message, ConsoleSendError};
 
 use fern::{log_file, Dispatch};
 use log::{error, info, warn, LevelFilter};
-use mangle_detached_console::ConsoleServer;
 use parking_lot::Mutex;
 use regex::{Regex, RegexSet};
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{read_to_string, File};
 use std::io::{Read, Write};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio_native_tls::native_tls::Identity;
 use toml::from_str;
@@ -47,7 +50,7 @@ use tower_http::{
 use auth::bearer::BearerAuth;
 
 pub use bimap;
-pub use log;
+pub use fern;
 pub use parking_lot;
 pub use rand;
 #[cfg(any(feature = "redis"))]
@@ -108,6 +111,8 @@ pub fn make_app<const N: usize>(
 pub enum BindAddress {
     #[serde(rename = "local")]
     Local(String),
+    #[serde(rename = "http")]
+    HTTP(IpAddr),
     #[serde(rename = "network")]
     Network(SocketAddr),
 }
@@ -126,84 +131,47 @@ pub fn get_pipe_name(pipe_name_env_var: &'static str, default_pipe_name: &'stati
     }
 }
 
-pub async fn pre_matches<Config: DeserializeOwned>(
-    app: Command,
-    pipe_name: &OsStr,
-) -> Result<Option<Config>> {
-    let args: Vec<String> = env::args().collect();
-    let matches = app.get_matches_from(args.clone());
-
-    let config_path;
-
-    match matches.subcommand() {
-        Some(("start", matches)) => match send_message(
-            pipe_name,
-            format!("{} status", env::current_exe()?.display()),
-        )
-        .await
-        {
-            Ok(msg) => {
-                return Err(Error::msg(format!(
-                    "A server has already started up. Retrieved their status: {msg}"
-                )))
-            }
-
-            Err(e) => match e {
-                ConsoleSendError::NotFound => {
-                    // Do nothing and move on, there is no server
-                    config_path = matches
-                        .get_one("config_path")
-                        .cloned()
-                        .unwrap_or("configs.toml".to_string());
-                }
-                e => return Err(e).context("Verifying if server is already active"),
-            },
-        },
-
-        None => {
-            return Err(Error::msg(
-                "You need to type a command as an argument! Use -h for more information",
-            ))
-        }
-
-        _ => {
-            // All subcommands not caught by the match should be sent to the server
-            return match send_message(pipe_name, args.join(" ")).await {
-                Ok(msg) => {
-                    println!("{msg}");
-                    Ok(None)
-                }
-                Err(e) => Err(match e {
-                    ConsoleSendError::NotFound => {
-                        Error::msg("Could not issue command. The server may not be running")
-                    }
-                    ConsoleSendError::PermissionDenied => {
-                        Error::msg("Could not issue command. You may not have adequate permissions")
-                    }
-                    _ => Error::msg(format!(
-                        "Faced the following error while trying to issue the command: {e:?}"
-                    )),
-                }),
-            };
-        }
-    }
-
-    macro_rules! err {
-        () => {
-            |e| {
-                Into::<anyhow::Error>::into(e)
-                    .context(format!("Reading configuration file: {config_path}"))
-            }
-        };
-    }
-
-    from_str(&read_to_string(&config_path).map_err(err!())?)
-        .map_err(err!())
-        .map(Option::Some)
+pub enum CommandMatchResult<'a, Config> {
+    StartProgram(Config),
+    Unmatched((&'a str, &'a ArgMatches)),
 }
 
-pub fn setup_logger(stderr_log_path: &str, routing_log_path: &str, security_log_path: &str) -> Result<()>
+pub async fn pre_matches<'a, Config, M>(
+    matches: &ArgMatches,
+    pipe_name: impl ToLocalSocketName<'a>,
+    on_active_msg: Option<M>,
+) -> Result<CommandMatchResult<Config>>
+where
+    Config: DeserializeOwned,
+    M: std::fmt::Display + std::fmt::Debug + Send + Sync + 'static,
 {
+    match matches.subcommand() {
+        Some(("start", matches)) => {
+            if start_connection(pipe_name).await.is_ok() {
+                return Err(if let Some(msg) = on_active_msg {
+                    Error::msg(msg)
+                } else {
+                    Error::msg("A server may be active")
+                });
+            }
+            let config_path: &String = matches.get_one("config_path").unwrap();
+            let err_msg = format!("Reading configuration file: {config_path}");
+            from_str(&read_to_string(config_path).context(err_msg.clone())?)
+                .context(err_msg)
+                .map(CommandMatchResult::StartProgram)
+        }
+        Some((name, matches)) => Ok(CommandMatchResult::Unmatched((name, matches))),
+        None => return Err(Error::msg(
+            "You need to type a command as an argument! Use -h for more information",
+        ))
+    }
+}
+
+pub fn setup_logger(
+    stderr_log_path: &str,
+    routing_log_path: &str,
+    security_log_path: &str,
+) -> Result<Dispatch> {
     let routing_regex = Regex::new(ROUTING_REGEX_RAW).unwrap();
     let non_stderr = Arc::new(
         RegexSet::new([
@@ -214,7 +182,7 @@ pub fn setup_logger(stderr_log_path: &str, routing_log_path: &str, security_log_
     );
     let non_stderr2 = non_stderr.clone();
 
-    Dispatch::new()
+    Ok(Dispatch::new()
         .format(|out, message, record| {
             out.finish(format_args!(
                 "{}[{}][{}:{}] {}",
@@ -246,8 +214,7 @@ pub fn setup_logger(stderr_log_path: &str, routing_log_path: &str, security_log_
                         && metadata.level() <= *STDERR_LOG_LEVEL.lock()
                 })
                 .chain(
-                    log_file(stderr_log_path)
-                        .context(format!("Opening {:?}", stderr_log_path))?,
+                    log_file(stderr_log_path).context(format!("Opening {:?}", stderr_log_path))?,
                 ),
         )
         // Routing to file
@@ -270,10 +237,7 @@ pub fn setup_logger(stderr_log_path: &str, routing_log_path: &str, security_log_
                     log_file(security_log_path)
                         .context(format!("Opening {:?}", security_log_path))?,
                 ),
-        )
-        .apply()
-        .context("Setting up logger")?;
-    Ok(())
+        ))
 }
 
 pub async fn get_https_credentials(
@@ -312,7 +276,8 @@ pub async fn get_https_credentials(
         if let BindAddress::Network(mut address) = bind_address {
             let solver = Http01Solver::new();
             address.set_port(80);
-            let handle = solver.start(&address)
+            let handle = solver
+                .start(&address)
                 .context(format!("Binding ACME solver to {address}"))?;
 
             // Create a new directory for Let's Encrypt Production
@@ -331,7 +296,7 @@ pub async fn get_https_credentials(
                 .create_if_not_exists()
                 .await
                 .context("Creating ACME account")?;
-            
+
             // Obtain your certificate
             let certificate = account
                 .certificate()
@@ -348,10 +313,7 @@ pub async fn get_https_credentials(
                 .private_key_to_pem()
                 .context("Converting private key to pem")?;
 
-            handle
-                .stop()
-                .await
-                .context("Stopping ACME handle")?;
+            handle.stop().await.context("Stopping ACME handle")?;
 
             File::create(certs_path)
                 .context(format!("Opening {}", certs_path))?
@@ -372,22 +334,40 @@ pub async fn get_https_credentials(
     Identity::from_pkcs8(&certs, &key).context("Loading HTTPS Credentials")
 }
 
-pub async fn start_api<State, const N1: usize, const N2: usize, A, B>(
+pub async fn start_api<'a, State, const N1: usize, const N2: usize, A, B, H, F, Fut>(
     state: State,
     app: Command,
-    pipe_name: OsString,
+    pipe_name: impl ToLocalSocketName<'a>,
     config: BaseConfig<A, B>,
     public_paths: [&'static str; N1],
     routes: [(&'static str, MethodRouter<State>); N2],
-    https_der: Option<Identity>,
+    https_identity: Option<Identity>,
+    control_handler: H,
+    control_listener_error_handler: Option<F>,
+    stop_receiver: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()>
 where
     State: Clone + Send + Sync + 'static,
     A: Into<AllowMethods>,
     B: Into<AllowOrigin>,
+    H: MessageHandler<
+            RecoverableError: Send + Sync + 'static,
+            IrrecoverableError: Send + Sync + 'static,
+        > + Send
+        + 'static,
+    F: Fn(ListenerError<H>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send,
 {
-    // Setup Console Server
-    let mut console_server = ConsoleServer::bind(&pipe_name).context("Starting ConsoleServer")?;
+    // Setup Control Server
+    if let Some(err_handler) = control_listener_error_handler {
+        start_listener(pipe_name, control_handler, err_handler)
+    } else {
+        start_listener(pipe_name, control_handler, |e| async move {
+            error!("Received error while listening for controls: {e:?}")
+        })
+    }
+    .context("Setting up control listener")?
+    .detach();
 
     // Setup Router
     let mut router = Router::new();
@@ -413,8 +393,7 @@ where
 
     let startup_msg = std::cell::RefCell::new(String::new());
 
-    // Setup side functionality
-    let mut final_event = None;
+    // Setup side functionality, such as ctrl_c listener
     let fut = async {
         tokio::select! {
             res = tokio::signal::ctrl_c() => {
@@ -425,79 +404,11 @@ where
                 }
             }
             () = async {
-                info!("{}", startup_msg.borrow());
-                *startup_msg.borrow_mut() = String::new();
-    
-                // Only print criticals from now on
-                *CRITICAL_LOG_LEVEL.lock() = LevelFilter::Error;
-
-                loop {
-                    let mut event = match console_server.accept().await {
-                        Ok(x) => x,
-                        Err(e) => {
-                            error!(target: "console_server", "Received IOError while listening on ConsoleServer {e:?}");
-                            continue
-                        }
-                    };
-                    let message = event.take_message().unwrap();
-
-                    let matches = match app.clone().try_get_matches_from(message.split_whitespace()) {
-                        Ok(x) => x,
-                        Err(e) => {
-                            error!(target: "console_server", "Failed to parse client console message {message}. Error: {e:?}");
-                            continue
-                        }
-                    };
-
-                    macro_rules! write_all {
-                        ($msg: expr) => {
-                            match event.write_all($msg).await {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    error!(target: "console_server", "Failed to respond to client console {e:?}");
-                                    continue
-                                }
-                            }
-                        }
-                    }
-
-                    match matches.subcommand().unwrap() {
-                        ("log_level", matches) => match matches.get_one::<String>("new_level") {
-                            Some(new_level) => {
-                                let new_level = match new_level.parse() {
-                                    Ok(x) => x,
-                                    Err(e) => {
-                                        error!(target: "console_server", "Failed to parse new_level: {e:?}");
-                                        write_all!(format!("Failed to parse new_level: {e:?}").as_str());
-                                        continue
-                                    }
-                                };
-
-                                match matches.get_one::<String>("target").unwrap().as_str() {
-                                    "stderr" => *STDERR_LOG_LEVEL.lock() = new_level,
-                                    "routing" => *ROUTING_LOG_LEVEL.lock() = new_level,
-                                    _ => write_all!("Unrecognized target")
-                                }
-                            }
-                            None => match matches.get_one::<String>("target").unwrap().as_str() {
-                                "stderr" => write_all!(STDERR_LOG_LEVEL.lock().to_string().to_lowercase().as_str()),
-                                "routing" => write_all!(ROUTING_LOG_LEVEL.lock().to_string().to_lowercase().as_str()),
-                                _ => write_all!("Unrecognized target")
-                            }
-                        }
-                        ("status", _) => write_all!("Server is good!"),
-                        ("stop", _) => {
-                            final_event = Some(event);
-                            warn!("Stop command issued");
-                            break
-                        }
-                        (cmd, _) => {
-                            error!(target: "console_server", "Received the following unrecognized command from client console: {cmd}");
-                            write_all!("Unrecognized command: {cmd}")
-                        }
-                    }
+                if stop_receiver.await.is_err() {
+                    // Do nothing if stop_receiver was dropped
+                    std::future::pending().await
                 }
-            } => {}
+            } => { }
         }
     };
 
@@ -529,7 +440,7 @@ where
             return Err(Error::msg("Local Sockets are only supported on Unix"))
         }
         BindAddress::Network(addr) => {
-            if let Some(identity) = https_der {
+            if let Some(identity) = https_identity {
                 if addr.port() != 443 {
                     warn!("Serving HTTPS on a different than 443")
                 }
@@ -543,11 +454,21 @@ where
                 run!(Server::bind(&addr), addr);
             }
         }
+        BindAddress::HTTP(addr) => {
+            if let Some(identity) = https_identity {
+                let addr = SocketAddr::new(addr, 443);
+                run!(
+                    Server::builder(
+                        TlsAcceptor::new(identity, &addr).context("Initializing https")?
+                    ),
+                    addr
+                );
+            } else {
+                let addr = SocketAddr::new(addr, 80);
+                run!(Server::bind(&addr), addr);
+            }
+        }
     };
-
-    if let Some(mut event) = final_event {
-        event.write_all("Server stopped successfully").await?
-    }
 
     Ok(())
 }

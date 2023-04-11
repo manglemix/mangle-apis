@@ -65,6 +65,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bddcadddf5e9015d310179a59bb28c4d4b9920ad0f11e8e14dbadf654890c9a6"
 
 [[package]]
+name = "async-bincode"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5601906cc87c2177c9a90617e66769aca8b334a4cd8111e951bf6afd84ba5cc"
+dependencies = [
+ "bincode",
+ "byteorder",
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "async-channel"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -107,13 +122,13 @@ checksum = "7a40729d2133846d9ed0ea60a8b9541bccddab49cd30f0715a1da672fe9a2524"
 
 [[package]]
 name = "async-trait"
-version = "0.1.64"
+version = "0.1.68"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cd7fce9ba8c3c042128ce72d8b2ddbf3a05747efb67ea0313c635e10bda47a2"
+checksum = "b9ccdd8f2a161be9bd5c023df56f1b2a0bd1d83872ae53b71a84a12c9bf6e842"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 1.0.109",
+ "syn 2.0.13",
 ]
 
 [[package]]
@@ -612,6 +627,7 @@ dependencies = [
  "axum",
  "dashmap",
  "derive_more",
+ "log",
  "mangle-api-core",
  "rustrict",
  "serde",
@@ -1582,7 +1598,7 @@ dependencies = [
  "hyper",
  "lers",
  "log",
- "mangle-detached-console",
+ "messagist",
  "oauth2",
  "openid",
  "parking_lot",
@@ -1598,16 +1614,6 @@ dependencies = [
  "toml",
  "tower",
  "tower-http",
-]
-
-[[package]]
-name = "mangle-detached-console"
-version = "0.1.0"
-source = "git+https://github.com/manglemix/mangle_detached_console.git#935d856d4f95957cf14e3ea4050ee5660919f5fb"
-dependencies = [
- "futures",
- "interprocess",
- "tokio",
 ]
 
 [[package]]
@@ -1627,6 +1633,23 @@ name = "memchr"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dffe52ecf27772e601905b7522cb4ef790d2cc203488bbd0e2fe85fcb74566d"
+
+[[package]]
+name = "messagist"
+version = "0.1.0"
+dependencies = [
+ "async-bincode",
+ "async-trait",
+ "axum",
+ "bincode",
+ "derive_more",
+ "futures",
+ "futures-io",
+ "interprocess",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "mime"

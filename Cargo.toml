@@ -2,6 +2,7 @@
 members = [
     "mangle-api-core",
     "bola-api",
+    "messagist"
 ]
 
 [workspace.dependencies]
@@ -10,8 +11,10 @@ anyhow = "1.0.68"
 
 axum = { version = "0.6.1", features = ["http2", "ws", "headers", "macros"] }
 
+log = "0.4"
+
 serde = { version = "1.0.151", features = ["derive"] }
 derive_more = "0.99.16"
 
-[profile.release]
-lto = true
+# [profile.release]
+# lto = true

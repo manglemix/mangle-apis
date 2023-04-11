@@ -3,7 +3,8 @@ use std::{ops::Deref, sync::Arc, time::Instant};
 use anyhow::{anyhow, Context};
 use aws_sdk_dynamodb::model::{AttributeAction, AttributeValue, AttributeValueUpdate};
 use derive_more::{Display, Error};
-use mangle_api_core::{distributed::Node, log::error, parking_lot::RwLock};
+use log::error;
+use mangle_api_core::{distributed::Node, parking_lot::RwLock};
 use serde::Serialize;
 use tokio::{
     spawn,

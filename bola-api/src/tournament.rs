@@ -1,4 +1,4 @@
-use mangle_api_core::log::error;
+use log::error;
 use mangle_api_core::rand::{rngs::StdRng, RngCore, SeedableRng};
 use serde::Serialize;
 use std::{

@@ -1,12 +1,16 @@
 use std::{
     net::SocketAddr,
     pin::Pin,
-    task::{self, Poll}, sync::Arc,
+    sync::Arc,
+    task::{self, Poll},
 };
 
 use anyhow::Error;
-use futures::{future::BoxFuture};
-use hyper::server::{accept::Accept, conn::{AddrIncoming, AddrStream}};
+use futures::future::BoxFuture;
+use hyper::server::{
+    accept::Accept,
+    conn::{AddrIncoming, AddrStream},
+};
 use log::error;
 use tokio_native_tls::{
     native_tls::{Identity, TlsAcceptor as InnerTlsAcceptor},
@@ -16,7 +20,7 @@ use tokio_native_tls::{
 pub struct TlsAcceptor<'a> {
     incoming: AddrIncoming,
     acceptor_loop: Option<BoxFuture<'a, Result<TlsStream<AddrStream>, Error>>>,
-    tls_acceptor: Arc<TlsAcceptorWrapper>
+    tls_acceptor: Arc<TlsAcceptorWrapper>,
 }
 
 impl<'a> TlsAcceptor<'a> {
@@ -57,7 +61,7 @@ impl<'a> Accept for TlsAcceptor<'a> {
             Poll::Ready(None) => return Poll::Ready(None),
             Poll::Ready(Some(Err(e))) => {
                 error!(target: "routing", "Error accepting connection: {e:?}");
-                return Poll::Pending
+                return Poll::Pending;
             }
             Poll::Ready(Some(Ok(x))) => x,
             Poll::Pending => return Poll::Pending,
@@ -65,10 +69,7 @@ impl<'a> Accept for TlsAcceptor<'a> {
 
         let tls = self.tls_acceptor.clone();
         self.acceptor_loop = Some(Box::pin(async move {
-            tls
-                .accept(stream)
-                .await
-                .map_err(Into::into)
+            tls.accept(stream).await.map_err(Into::into)
         }));
 
         self.poll_accept(cx)

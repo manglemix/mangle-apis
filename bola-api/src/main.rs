@@ -6,9 +6,14 @@
 use std::{fs::read_to_string, sync::Arc, time::Duration};
 
 use anyhow::{self, Context};
-use axum::{extract::FromRef, http::{HeaderValue, StatusCode}, response::Response};
+use axum::{
+    extract::FromRef,
+    http::{HeaderValue, StatusCode},
+    response::Response,
+};
 use db::DB;
 use leaderboard::Leaderboard;
+use log::info;
 use mangle_api_core::{
     auth::{
         auth_pages::{AuthPages, AuthPagesSrc},
@@ -21,7 +26,7 @@ use mangle_api_core::{
     distributed::Node,
     get_https_credentials, get_pipe_name, make_app,
     neo_api::{ws_api_route, APIConnectionManager},
-    pre_matches, setup_logger, start_api, BaseConfig, log::info,
+    pre_matches, setup_logger, start_api, BaseConfig,
 };
 use multiplayer::Multiplayer;
 use tokio::{self};
@@ -82,11 +87,19 @@ async fn main() -> anyhow::Result<()> {
         return Ok(())
     };
 
-    setup_logger(&config.stderr_log, &config.routing_log, &config.security_log)?;
+    setup_logger(
+        &config.stderr_log,
+        &config.routing_log,
+        &config.security_log,
+    )?
+    .apply()
+    .context("Setting up logger")?;
 
     let https_der = if config.https {
         if config.https_domain.is_empty() {
-            return Err(anyhow::Error::msg("https is true, but https_domain is empty"))
+            return Err(anyhow::Error::msg(
+                "https is true, but https_domain is empty",
+            ));
         }
         let tmp = Some(
             get_https_credentials(
@@ -207,7 +220,7 @@ async fn main() -> anyhow::Result<()> {
                         .status(StatusCode::TEMPORARY_REDIRECT)
                         .body(String::new())
                         .unwrap()
-                })
+                }),
             ),
         ],
         https_der,

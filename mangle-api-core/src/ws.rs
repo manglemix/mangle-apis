@@ -1,6 +1,10 @@
 use std::{borrow::Cow, time::Duration};
 
-use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::{
+    async_trait,
+    extract::ws::{CloseFrame, Message, WebSocket},
+};
+use messagist::text::TextStream;
 use tokio::{
     select, spawn,
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
@@ -102,8 +106,8 @@ impl ManagedWebSocket {
     ///
     /// Returns `None` if the WebSocket faced an error before this method was called, or while waiting,
     /// thus dropping `self`
-    pub async fn recv(mut self) -> Option<(Self, Message)> {
-        self.msg_receiver.recv().await.map(move |msg| (self, msg))
+    pub async fn recv(mut self) -> Option<(Message, Self)> {
+        self.msg_receiver.recv().await.map(move |msg| (msg, self))
     }
 
     pub async fn option_recv(ws: &mut Option<Self>) -> Option<Message> {
@@ -145,5 +149,27 @@ impl ManagedWebSocket {
             code: code as u16,
             reason: reason.into(),
         })));
+    }
+}
+
+#[async_trait]
+impl TextStream for ManagedWebSocket {
+    async fn recv_string(mut self) -> Result<(Vec<u8>, Self), std::io::Error> {
+        loop {
+            let (msg, tmp) = self.recv().await.ok_or(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "WebSocket task was aborted",
+            ))?;
+            self = tmp;
+            let Message::Text(msg) = msg else { continue };
+            break Ok((msg.into_bytes(), self));
+        }
+    }
+
+    async fn send_string(mut self, msg: String) -> Result<Self, std::io::Error> {
+        self.send(msg).ok_or(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "WebSocket task was aborted",
+        ))
     }
 }
