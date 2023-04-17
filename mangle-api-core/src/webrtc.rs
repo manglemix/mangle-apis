@@ -202,6 +202,10 @@ pub enum JoinSessionError {
     Full,
 }
 
+
+pub struct ExistingSessionError;
+
+
 #[derive(Clone)]
 pub struct WebRTCSessionManager<K>
 where
@@ -214,8 +218,8 @@ impl<K> WebRTCSessionManager<K>
 where
     K: Hash + Eq + Clone,
 {
-    pub fn host_session(&self, id: K, max_size: usize) -> Result<HostConnectionReceiver<K>, ()> {
-        let Entry::Vacant(slot) = self.inner.sessions.entry(id.clone()) else { return Err(())};
+    pub fn host_session(&self, id: K, max_size: usize) -> Result<HostConnectionReceiver<K>, ExistingSessionError> {
+        let Entry::Vacant(slot) = self.inner.sessions.entry(id.clone()) else { return Err(ExistingSessionError)};
         let (sender, conn_stream_recv) = mpsc::channel(max_size);
         let (alive_sender, alive_recv) = broadcast::channel(0);
 

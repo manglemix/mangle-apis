@@ -15,10 +15,15 @@ tokio = { workspace = true }
 axum = { workspace = true }
 futures-io = { version = "0.3.28", optional = true }
 interprocess = { version = "1.2.1", features = ["tokio_support"], optional = true }
-async-bincode = { version = "0.7.0", optional = true }
+# async-bincode = { version = "0.7.0", optional = true }
 futures = { version = "0.3.28", optional = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+# manglext = { path = "../manglext" }
+# negative-impl = { workspace = true }
+tokio-util = { version = "0.7.7", features = ["compat"] }
 
 [features]
 json = ["serde_json"]
-bin = ["bincode", "async-bincode", "futures"]
+bin = ["bincode", "futures"]
 pipes = ["bin", "futures-io", "interprocess"]

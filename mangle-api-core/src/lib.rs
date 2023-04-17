@@ -1,10 +1,9 @@
 #![feature(string_leak)]
 #![feature(never_type)]
 #![feature(associated_type_bounds)]
+#![feature(exclusive_wrapper)]
 
-use axum::http::HeaderValue;
-use axum::routing::MethodRouter;
-use axum::{Router, Server};
+use axum::{http::HeaderValue, routing::MethodRouter, Router, Server};
 
 pub mod auth;
 pub mod distributed;
@@ -17,33 +16,38 @@ pub mod ws;
 pub mod db;
 
 use anyhow::{Context, Error, Result};
-use clap::builder::IntoResettable;
-use clap::{arg, ArgMatches, Command};
-use futures::Future;
-use lers::solver::Http01Solver;
-use lers::{Directory, LETS_ENCRYPT_PRODUCTION_URL};
-use messagist::pipes::{start_connection, start_listener, ListenerError, ToLocalSocketName};
-use messagist::{MessageHandler, MessageStream, RecvError};
-// use mangle_detached_console::{send_message, ConsoleSendError};
+use clap::{arg, builder::IntoResettable, ArgMatches, Command};
+use lers::{solver::Http01Solver, Directory, LETS_ENCRYPT_PRODUCTION_URL};
+use messagist::{
+    pipes::{
+        start_connection, start_listener, DefaultListenerErrorHandler, ListenerErrorHandler,
+        ToLocalSocketName,
+    },
+    ExclusiveMessageHandler,
+};
+use std::future::{pending, Future};
 
 use fern::{log_file, Dispatch};
-use log::{error, info, warn, LevelFilter};
+use log::{error, warn, LevelFilter, info};
 use parking_lot::Mutex;
 use regex::{Regex, RegexSet};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use std::env;
-use std::ffi::{OsStr, OsString};
-use std::fs::{read_to_string, File};
-use std::io::{Read, Write};
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use serde::{de::DeserializeOwned, Deserialize};
+use std::{
+    env,
+    ffi::OsString,
+    fs::{read_to_string, File},
+    future::Pending,
+    io::{Read, Write},
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 use tokio_native_tls::native_tls::Identity;
 use toml::from_str;
 use tower::ServiceBuilder;
-use tower_http::cors::{AllowMethods, AllowOrigin};
 use tower_http::{
-    auth::RequireAuthorizationLayer, compression::CompressionLayer, cors::CorsLayer,
+    auth::RequireAuthorizationLayer,
+    compression::CompressionLayer,
+    cors::{AllowMethods, AllowOrigin, CorsLayer},
     trace::TraceLayer,
 };
 
@@ -117,13 +121,6 @@ pub enum BindAddress {
     Network(SocketAddr),
 }
 
-pub struct BaseConfig<A: Into<AllowMethods>, B: Into<AllowOrigin>> {
-    pub cors_allowed_methods: A,
-    pub cors_allowed_origins: B,
-    pub api_token: HeaderValue,
-    pub bind_address: BindAddress,
-}
-
 pub fn get_pipe_name(pipe_name_env_var: &'static str, default_pipe_name: &'static str) -> OsString {
     match env::var_os(pipe_name_env_var) {
         Some(x) => x,
@@ -136,14 +133,13 @@ pub enum CommandMatchResult<'a, Config> {
     Unmatched((&'a str, &'a ArgMatches)),
 }
 
-pub async fn pre_matches<'a, Config, M>(
+pub async fn pre_matches<'a, Config>(
     matches: &ArgMatches,
     pipe_name: impl ToLocalSocketName<'a>,
-    on_active_msg: Option<M>,
+    on_active_msg: Option<String>,
 ) -> Result<CommandMatchResult<Config>>
 where
     Config: DeserializeOwned,
-    M: std::fmt::Display + std::fmt::Debug + Send + Sync + 'static,
 {
     match matches.subcommand() {
         Some(("start", matches)) => {
@@ -154,16 +150,19 @@ where
                     Error::msg("A server may be active")
                 });
             }
-            let config_path: &String = matches.get_one("config_path").unwrap();
+            let config_path: String = matches
+                .get_one("config_path")
+                .cloned()
+                .unwrap_or("configs.toml".into());
             let err_msg = format!("Reading configuration file: {config_path}");
             from_str(&read_to_string(config_path).context(err_msg.clone())?)
                 .context(err_msg)
                 .map(CommandMatchResult::StartProgram)
         }
         Some((name, matches)) => Ok(CommandMatchResult::Unmatched((name, matches))),
-        None => return Err(Error::msg(
+        None => Err(Error::msg(
             "You need to type a command as an argument! Use -h for more information",
-        ))
+        )),
     }
 }
 
@@ -334,141 +333,415 @@ pub async fn get_https_credentials(
     Identity::from_pkcs8(&certs, &key).context("Loading HTTPS Credentials")
 }
 
-pub async fn start_api<'a, State, const N1: usize, const N2: usize, A, B, H, F, Fut>(
-    state: State,
-    app: Command,
-    pipe_name: impl ToLocalSocketName<'a>,
-    config: BaseConfig<A, B>,
+#[derive(Clone, Copy)]
+pub struct Unset;
+
+pub struct API<
+    S = Unset,
+    P = Unset,
+    AT = Unset,
+    BA = Unset,
+    const N1: usize = 0,
+    const N2: usize = 0,
+    H = Unset,
+    F = DefaultListenerErrorHandler,
+    Fut = Pending<()>,
+> {
+    state: S,
+    pipe_name: P,
+    cors_allowed_methods: AllowMethods,
+    cors_allowed_origins: AllowOrigin,
+    api_token: AT,
+    bind_address: BA,
     public_paths: [&'static str; N1],
-    routes: [(&'static str, MethodRouter<State>); N2],
+    routes: [(&'static str, MethodRouter<S>); N2],
     https_identity: Option<Identity>,
     control_handler: H,
-    control_listener_error_handler: Option<F>,
-    stop_receiver: tokio::sync::oneshot::Receiver<()>,
-) -> Result<()>
-where
-    State: Clone + Send + Sync + 'static,
-    A: Into<AllowMethods>,
-    B: Into<AllowOrigin>,
-    H: MessageHandler<
-            RecoverableError: Send + Sync + 'static,
-            IrrecoverableError: Send + Sync + 'static,
-        > + Send
-        + 'static,
-    F: Fn(ListenerError<H>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = ()> + Send,
+    control_listener_error_handler: F,
+    concurrent_fut: Fut,
+}
+
+pub fn new_api(
+) -> API<Unset, Unset, Unset, Unset, 0, 0, Unset, DefaultListenerErrorHandler, Pending<()>> {
+    API {
+        state: Unset,
+        pipe_name: Unset,
+        cors_allowed_methods: AllowMethods::from([]),
+        cors_allowed_origins: AllowOrigin::from([]),
+        api_token: Unset,
+        bind_address: Unset,
+        public_paths: [],
+        routes: [],
+        https_identity: None,
+        control_handler: Unset,
+        control_listener_error_handler: DefaultListenerErrorHandler,
+        concurrent_fut: pending(),
+    }
+}
+
+impl<S, P, AT, BO, const N1: usize, const N2: usize, H, F, Fut>
+    API<S, P, AT, BO, N1, N2, H, F, Fut>
 {
-    // Setup Control Server
-    if let Some(err_handler) = control_listener_error_handler {
-        start_listener(pipe_name, control_handler, err_handler)
-    } else {
-        start_listener(pipe_name, control_handler, |e| async move {
-            error!("Received error while listening for controls: {e:?}")
-        })
+    /// Sets the state used by this API
+    /// # Warning
+    /// Setting the state removes all existing routes
+    pub fn set_state<S2>(self, state: S2) -> API<S2, P, AT, BO, N1, 0, H, F, Fut>
+    where
+        S2: Clone + Send + Sync + 'static,
+    {
+        API {
+            state,
+            pipe_name: self.pipe_name,
+            cors_allowed_methods: self.cors_allowed_methods,
+            cors_allowed_origins: self.cors_allowed_origins,
+            api_token: self.api_token,
+            bind_address: self.bind_address,
+            public_paths: self.public_paths,
+            routes: [],
+            https_identity: self.https_identity,
+            control_handler: self.control_handler,
+            control_listener_error_handler: self.control_listener_error_handler,
+            concurrent_fut: self.concurrent_fut,
+        }
     }
-    .context("Setting up control listener")?
-    .detach();
-
-    // Setup Router
-    let mut router = Router::new();
-
-    for (route, method) in routes {
-        router = router.route(route, method);
+    pub fn set_pipe_name(self, pipe_name: OsString) -> API<S, OsString, AT, BO, N1, N2, H, F, Fut> {
+        API {
+            state: self.state,
+            pipe_name,
+            cors_allowed_methods: self.cors_allowed_methods,
+            cors_allowed_origins: self.cors_allowed_origins,
+            api_token: self.api_token,
+            bind_address: self.bind_address,
+            public_paths: self.public_paths,
+            routes: self.routes,
+            https_identity: self.https_identity,
+            control_handler: self.control_handler,
+            control_listener_error_handler: self.control_listener_error_handler,
+            concurrent_fut: self.concurrent_fut,
+        }
     }
+    pub fn set_cors_allowed_methods(
+        self,
+        cors_allowed_methods: impl Into<AllowMethods>,
+    ) -> API<S, P, AT, BO, N1, N2, H, F, Fut> {
+        API {
+            state: self.state,
+            pipe_name: self.pipe_name,
+            cors_allowed_methods: cors_allowed_methods.into(),
+            cors_allowed_origins: self.cors_allowed_origins,
+            api_token: self.api_token,
+            bind_address: self.bind_address,
+            public_paths: self.public_paths,
+            routes: self.routes,
+            https_identity: self.https_identity,
+            control_handler: self.control_handler,
+            control_listener_error_handler: self.control_listener_error_handler,
+            concurrent_fut: self.concurrent_fut,
+        }
+    }
+    pub fn set_cors_allowed_origins(
+        self,
+        cors_allowed_origins: impl Into<AllowOrigin>,
+    ) -> API<S, P, AT, BO, N1, N2, H, F, Fut> {
+        API {
+            state: self.state,
+            pipe_name: self.pipe_name,
+            cors_allowed_methods: self.cors_allowed_methods,
+            cors_allowed_origins: cors_allowed_origins.into(),
+            api_token: self.api_token,
+            bind_address: self.bind_address,
+            public_paths: self.public_paths,
+            routes: self.routes,
+            https_identity: self.https_identity,
+            control_handler: self.control_handler,
+            control_listener_error_handler: self.control_listener_error_handler,
+            concurrent_fut: self.concurrent_fut,
+        }
+    }
+    pub fn set_api_token(
+        self,
+        api_token: HeaderValue,
+    ) -> API<S, P, HeaderValue, BO, N1, N2, H, F, Fut> {
+        API {
+            state: self.state,
+            pipe_name: self.pipe_name,
+            cors_allowed_methods: self.cors_allowed_methods,
+            cors_allowed_origins: self.cors_allowed_origins,
+            api_token,
+            bind_address: self.bind_address,
+            public_paths: self.public_paths,
+            routes: self.routes,
+            https_identity: self.https_identity,
+            control_handler: self.control_handler,
+            control_listener_error_handler: self.control_listener_error_handler,
+            concurrent_fut: self.concurrent_fut,
+        }
+    }
+    pub fn set_bind_address(
+        self,
+        bind_address: BindAddress,
+    ) -> API<S, P, AT, BindAddress, N1, N2, H, F, Fut> {
+        API {
+            state: self.state,
+            pipe_name: self.pipe_name,
+            cors_allowed_methods: self.cors_allowed_methods,
+            cors_allowed_origins: self.cors_allowed_origins,
+            api_token: self.api_token,
+            bind_address,
+            public_paths: self.public_paths,
+            routes: self.routes,
+            https_identity: self.https_identity,
+            control_handler: self.control_handler,
+            control_listener_error_handler: self.control_listener_error_handler,
+            concurrent_fut: self.concurrent_fut,
+        }
+    }
+    pub fn set_public_paths<const N1_2: usize>(
+        self,
+        public_paths: [&'static str; N1_2],
+    ) -> API<S, P, AT, BO, N1_2, N2, H, F, Fut> {
+        API {
+            state: self.state,
+            pipe_name: self.pipe_name,
+            cors_allowed_methods: self.cors_allowed_methods,
+            cors_allowed_origins: self.cors_allowed_origins,
+            api_token: self.api_token,
+            bind_address: self.bind_address,
+            public_paths,
+            routes: self.routes,
+            https_identity: self.https_identity,
+            control_handler: self.control_handler,
+            control_listener_error_handler: self.control_listener_error_handler,
+            concurrent_fut: self.concurrent_fut,
+        }
+    }
+    pub fn set_routes<const N2_2: usize>(
+        self,
+        routes: [(&'static str, MethodRouter<S>); N2_2],
+    ) -> API<S, P, AT, BO, N1, N2_2, H, F, Fut> {
+        API {
+            state: self.state,
+            pipe_name: self.pipe_name,
+            cors_allowed_methods: self.cors_allowed_methods,
+            cors_allowed_origins: self.cors_allowed_origins,
+            api_token: self.api_token,
+            bind_address: self.bind_address,
+            public_paths: self.public_paths,
+            routes,
+            https_identity: self.https_identity,
+            control_handler: self.control_handler,
+            control_listener_error_handler: self.control_listener_error_handler,
+            concurrent_fut: self.concurrent_fut,
+        }
+    }
+    pub fn set_https_identity(
+        self,
+        https_identity: Identity,
+    ) -> API<S, P, AT, BO, N1, N2, H, F, Fut> {
+        API {
+            state: self.state,
+            pipe_name: self.pipe_name,
+            cors_allowed_methods: self.cors_allowed_methods,
+            cors_allowed_origins: self.cors_allowed_origins,
+            api_token: self.api_token,
+            bind_address: self.bind_address,
+            public_paths: self.public_paths,
+            routes: self.routes,
+            https_identity: Some(https_identity),
+            control_handler: self.control_handler,
+            control_listener_error_handler: self.control_listener_error_handler,
+            concurrent_fut: self.concurrent_fut,
+        }
+    }
+    pub fn set_control_handler<H2>(
+        self,
+        control_handler: H2,
+    ) -> API<S, P, AT, BO, N1, N2, H2, F, Fut>
+    where
+        H2: ExclusiveMessageHandler<Error: Send + Sync + 'static> + Send + 'static,
+    {
+        API {
+            state: self.state,
+            pipe_name: self.pipe_name,
+            cors_allowed_methods: self.cors_allowed_methods,
+            cors_allowed_origins: self.cors_allowed_origins,
+            api_token: self.api_token,
+            bind_address: self.bind_address,
+            public_paths: self.public_paths,
+            routes: self.routes,
+            https_identity: self.https_identity,
+            control_handler,
+            control_listener_error_handler: self.control_listener_error_handler,
+            concurrent_fut: self.concurrent_fut,
+        }
+    }
+    pub fn set_control_listener_error_handler<F2>(
+        self,
+        control_listener_error_handler: F2,
+    ) -> API<S, P, AT, BO, N1, N2, H, F2, Fut>
+    where
+        H: ExclusiveMessageHandler<Error: Send + Sync + 'static> + Send + 'static,
+        F2: ListenerErrorHandler<H>,
+    {
+        API {
+            state: self.state,
+            pipe_name: self.pipe_name,
+            cors_allowed_methods: self.cors_allowed_methods,
+            cors_allowed_origins: self.cors_allowed_origins,
+            api_token: self.api_token,
+            bind_address: self.bind_address,
+            public_paths: self.public_paths,
+            routes: self.routes,
+            https_identity: self.https_identity,
+            control_handler: self.control_handler,
+            control_listener_error_handler,
+            concurrent_fut: self.concurrent_fut,
+        }
+    }
+    pub fn set_concurrent_future<Fut2>(
+        self,
+        concurrent_fut: Fut2,
+    ) -> API<S, P, AT, BO, N1, N2, H, F, Fut2>
+    where
+        Fut2: Future,
+    {
+        API {
+            state: self.state,
+            pipe_name: self.pipe_name,
+            cors_allowed_methods: self.cors_allowed_methods,
+            cors_allowed_origins: self.cors_allowed_origins,
+            api_token: self.api_token,
+            bind_address: self.bind_address,
+            public_paths: self.public_paths,
+            routes: self.routes,
+            https_identity: self.https_identity,
+            control_handler: self.control_handler,
+            control_listener_error_handler: self.control_listener_error_handler,
+            concurrent_fut,
+        }
+    }
+}
 
-    let router = router.with_state(state).layer(
-        ServiceBuilder::new()
-            .layer(CompressionLayer::new())
-            .layer(TraceLayer::new_for_http())
-            .layer(
-                CorsLayer::new()
-                    .allow_methods(config.cors_allowed_methods)
-                    .allow_origin(config.cors_allowed_origins),
-            )
-            .layer(RequireAuthorizationLayer::custom(BearerAuth::new(
-                config.api_token,
-                RegexSet::new(public_paths).expect("Parsing open paths for Bearer Auth"),
-            ))),
-    );
+impl<S, const N1: usize, const N2: usize, H, F, Fut>
+    API<S, OsString, HeaderValue, BindAddress, N1, N2, H, F, Fut>
+where
+    S: Clone + Send + Sync + 'static,
+    H: ExclusiveMessageHandler<Error: Send + Sync + 'static> + Send + 'static,
+    F: ListenerErrorHandler<H>,
+    Fut: Future,
+{
+    pub async fn run(self) -> Result<()> {
+        // Setup Control Server
+        let control_listener = start_listener(
+            self.pipe_name,
+            self.control_handler,
+            self.control_listener_error_handler,
+        )
+        .context("Setting up control listener")?;
 
-    let startup_msg = std::cell::RefCell::new(String::new());
+        // Setup Router
+        let mut router = Router::new();
 
-    // Setup side functionality, such as ctrl_c listener
-    let fut = async {
-        tokio::select! {
-            res = tokio::signal::ctrl_c() => {
-                if let Err(e) = res {
-                    error!(target: "console_server", "Faced the following error while listening for ctrl_c: {:?}", e);
-                } else {
-                    warn!(target: "console_server", "Ctrl-C received");
+        for (route, method) in self.routes {
+            router = router.route(route, method);
+        }
+
+        let router = router.with_state(self.state).layer(
+            ServiceBuilder::new()
+                .layer(CompressionLayer::new())
+                .layer(TraceLayer::new_for_http())
+                .layer(
+                    CorsLayer::new()
+                        .allow_methods(self.cors_allowed_methods)
+                        .allow_origin(self.cors_allowed_origins),
+                )
+                .layer(RequireAuthorizationLayer::custom(BearerAuth::new(
+                    self.api_token,
+                    RegexSet::new(self.public_paths).expect("Parsing open paths for Bearer Auth"),
+                ))),
+        );
+
+        let startup_msg = std::cell::RefCell::new(String::new());
+
+        // Setup side functionality, such as ctrl_c listener
+        let fut = async {
+            info!("{}", startup_msg.borrow());
+            tokio::select! {
+                res = tokio::signal::ctrl_c() => {
+                    if let Err(e) = res {
+                        error!(target: "console_server", "Faced the following error while listening for ctrl_c: {:?}", e);
+                    } else {
+                        warn!(target: "console_server", "Ctrl-C received");
+                    }
+                }
+                res = control_listener => {
+                    if let Err(e) = res {
+                        error!("Faced the following error while joining with the control listener task: {e:?}");
+                    }
+                }
+                _ = self.concurrent_fut => {
+                    warn!("Concurrent future has ended")
                 }
             }
-            () = async {
-                if stop_receiver.await.is_err() {
-                    // Do nothing if stop_receiver was dropped
-                    std::future::pending().await
-                }
-            } => { }
-        }
-    };
-
-    macro_rules! run {
-        ($server: expr, $addr: expr) => {
-            *startup_msg.borrow_mut() = format!("Binded to {}", $addr);
-            $server
-                .serve(router.into_make_service())
-                .with_graceful_shutdown(fut)
-                .await
-                .map_err(Into::<Error>::into)
-                .context("Running the web server")?;
         };
-    }
 
-    // Setup Server
-    match config.bind_address {
-        #[cfg(unix)]
-        BindAddress::Local(addr) => {
-            let listener = tokio::net::UnixListener::bind(&addr)
-                .map_err(Into::<Error>::into)
-                .context("Binding to local address")?;
-            let stream = tokio_stream::wrappers::UnixListenerStream::new(listener);
-            let acceptor = hyper::server::accept::from_stream(stream);
-            run!(Server::builder(acceptor), addr);
+        macro_rules! run {
+            ($server:expr, $addr:expr) => {
+                *startup_msg.borrow_mut() = format!("Binded to {}", $addr);
+                $server
+                    .serve(router.into_make_service())
+                    .with_graceful_shutdown(fut)
+                    .await
+                    .context("Running the web server")?;
+            };
         }
-        #[cfg(not(unix))]
-        BindAddress::Local(_) => {
-            return Err(Error::msg("Local Sockets are only supported on Unix"))
-        }
-        BindAddress::Network(addr) => {
-            if let Some(identity) = https_identity {
-                if addr.port() != 443 {
-                    warn!("Serving HTTPS on a different than 443")
+
+        // Setup Server
+        match self.bind_address {
+            #[cfg(unix)]
+            BindAddress::Local(addr) => {
+                let listener = tokio::net::UnixListener::bind(&addr)
+                    .map_err(Into::<Error>::into)
+                    .context("Binding to local address")?;
+                let stream = tokio_stream::wrappers::UnixListenerStream::new(listener);
+                let acceptor = hyper::server::accept::from_stream(stream);
+                run!(Server::builder(acceptor), addr);
+            }
+            #[cfg(not(unix))]
+            BindAddress::Local(_) => {
+                return Err(Error::msg("Local Sockets are only supported on Unix"))
+            }
+            BindAddress::Network(addr) => {
+                if let Some(identity) = self.https_identity {
+                    if addr.port() != 443 {
+                        warn!("Serving HTTPS on a different port than 443")
+                    }
+                    run!(
+                        Server::builder(
+                            TlsAcceptor::new(identity, &addr).context("Initializing https")?
+                        ),
+                        addr
+                    );
+                } else {
+                    run!(Server::bind(&addr), addr);
                 }
-                run!(
-                    Server::builder(
-                        TlsAcceptor::new(identity, &addr).context("Initializing https")?
-                    ),
-                    addr
-                );
-            } else {
-                run!(Server::bind(&addr), addr);
             }
-        }
-        BindAddress::HTTP(addr) => {
-            if let Some(identity) = https_identity {
-                let addr = SocketAddr::new(addr, 443);
-                run!(
-                    Server::builder(
-                        TlsAcceptor::new(identity, &addr).context("Initializing https")?
-                    ),
-                    addr
-                );
-            } else {
-                let addr = SocketAddr::new(addr, 80);
-                run!(Server::bind(&addr), addr);
+            BindAddress::HTTP(addr) => {
+                if let Some(identity) = self.https_identity {
+                    let addr = SocketAddr::new(addr, 443);
+                    run!(
+                        Server::builder(
+                            TlsAcceptor::new(identity, &addr).context("Initializing https")?
+                        ),
+                        addr
+                    );
+                } else {
+                    let addr = SocketAddr::new(addr, 80);
+                    run!(Server::bind(&addr), addr);
+                }
             }
-        }
-    };
+        };
 
-    Ok(())
+        Ok(())
+    }
 }

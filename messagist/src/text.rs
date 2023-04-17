@@ -1,138 +1,116 @@
-use std::{collections::VecDeque, mem::replace};
+use std::pin::Pin;
 
 use async_trait::async_trait;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufStream};
+use serde::{de::DeserializeOwned, Serialize, Deserialize};
+use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::{MessageStream, RecvError};
+use crate::{MessageStream, bin::BinaryError};
+
+
+#[cfg(feature = "bin")]
+use crate::bin::{BinaryMessageStream};
+
+#[derive(thiserror::Error, Debug, derive_more::From)]
+pub enum BinaryJsonError {
+    #[error("IOError {0}")]
+    IOError(std::io::Error),
+    #[error("DeserializeError {0}")]
+    DeserializeError(serde_json::Error)
+}
 
 #[async_trait]
 pub trait TextStream: Sized {
-    async fn recv_string(mut self) -> Result<(Vec<u8>, Self), std::io::Error>;
-    async fn send_string(mut self, msg: String) -> Result<Self, std::io::Error>;
-}
+    type Error: std::error::Error + Send + Sync + 'static;
 
-pub struct BinaryTextStream<T: AsyncRead + AsyncWrite + Unpin + Send>(BufStream<T>);
+    async fn recv_string(&mut self) -> Result<String, Self::Error>;
+    async fn send_string(&mut self, msg: String) -> Result<(), Self::Error>;
+    async fn wait_for_error(&mut self) -> Self::Error;
+}
 
 pub struct JsonMessageStream<T>(T);
 
+#[cfg(feature = "bin")]
 #[async_trait]
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> MessageStream
-    for JsonMessageStream<BinaryTextStream<S>>
+    for JsonMessageStream<BinaryMessageStream<S>>
 {
-    type DeserializeError = serde_json::Error;
+    type Error = BinaryJsonError;
 
-    async fn recv_message<T>(mut self) -> Result<(T, Self), RecvError<Self>>
+    async fn recv_message<T>(&mut self) -> Result<T, Self::Error>
     where
-        T: DeserializeOwned,
+        T: DeserializeOwned + Send + 'static,
     {
-        let mut final_buf = vec![];
-        loop {
-            let size: usize = self.0 .0.read_u16().await.map_err(RecvError::IOError)? as usize;
-            let mut buf = vec![0; size];
-            self.0
-                 .0
-                .read_exact(&mut buf)
-                .await
-                .map_err(RecvError::IOError)?;
-            final_buf.append(&mut buf);
-
-            if size < u16::MAX as usize {
-                break;
-            }
-        }
-
-        match serde_json::from_slice(&final_buf) {
-            Ok(msg) => Ok((msg, self)),
-            Err(e) => return Err(RecvError::DeserializeError(e, self)),
-        }
+        let data: Vec<u8> = self.0
+            .recv_message()
+            .await
+            .map_err(|e| match e {
+                BinaryError::DeserializeError(_) => unreachable!(),
+                BinaryError::IOError(e) => e
+            })?;
+        
+        serde_json::from_slice(&data)
+            .map_err(Into::into)
     }
 
-    async fn recv_borrowed_message<T, F, O>(mut self, f: F) -> Result<(O, Self), RecvError<Self>>
-    where
-        for<'a> T: Deserialize<'a>,
-        F: FnOnce(T) -> O + Send,
-    {
-        let mut final_buf = vec![];
-        loop {
-            let size: usize = self.0 .0.read_u16().await.map_err(RecvError::IOError)? as usize;
-            let mut buf = vec![0; size];
-            self.0
-                 .0
-                .read_exact(&mut buf)
-                .await
-                .map_err(RecvError::IOError)?;
-            final_buf.append(&mut buf);
-
-            if size < u16::MAX as usize {
-                break;
-            }
-        }
-
-        match serde_json::from_slice(&final_buf) {
-            Ok(msg) => Ok(((f)(msg), self)),
-            Err(e) => return Err(RecvError::DeserializeError(e, self)),
-        }
+    async fn send_message<T: Serialize + Send + Sync + 'static>(
+        &mut self,
+        msg: &T,
+    ) -> Result<(), Self::Error> {
+        self
+            .0
+            .send_message(&serde_json::to_vec(&msg).unwrap())
+            .await
+            .map_err(|e| match e {
+                BinaryError::DeserializeError(_) => unreachable!(),
+                BinaryError::IOError(e) => e.into()
+            })
     }
 
-    async fn send_message<T: Serialize + Sync>(mut self, msg: &T) -> Result<Self, std::io::Error> {
-        let mut bytes: VecDeque<u8> = serde_json::to_vec(&msg).unwrap().into();
-
-        loop {
-            if bytes.len() >= u16::MAX as usize {
-                self.0 .0.write_u16(u16::MAX).await?;
-                let tmp = bytes.split_off(u16::MAX as usize);
-                let to_send = replace(&mut bytes, tmp);
-                self.0 .0.write_all(to_send.as_slices().0).await?;
-            } else {
-                self.0 .0.write_u16(bytes.len() as u16).await?;
-                self.0 .0.write_all(bytes.as_slices().0).await?;
-                break;
-            }
-        }
-
-        Ok(self)
+    async fn wait_for_error(&mut self) -> Self::Error {
+        let BinaryError::IOError(e) = self
+            .0
+            .wait_for_error()
+            .await else {
+                unreachable!()
+            };
+        e.into()
     }
 }
 
+
+#[derive(thiserror::Error, Debug)]
+pub enum TextJsonError<E: std::error::Error> {
+    #[error("TextError {0}")]
+    TextError(E),
+    #[error("DeserializeError {0}")]
+    DeserializeError(serde_json::Error)
+}
+
+
 #[async_trait]
-impl<S: TextStream + Send> MessageStream for JsonMessageStream<S> {
-    type DeserializeError = serde_json::Error;
+impl<S: TextStream<Error: Sync> + Send + Sync> MessageStream for JsonMessageStream<S> {
+    type Error = TextJsonError<S::Error>;
 
-    async fn recv_message<T>(mut self) -> Result<(T, Self), RecvError<Self>>
+    async fn recv_message<T>(&mut self) -> Result<T, Self::Error>
     where
-        T: DeserializeOwned,
+        T: DeserializeOwned + Send,
     {
-        let (msg, tmp) = self.0.recv_string().await.map_err(RecvError::IOError)?;
-        self.0 = tmp;
-
-        match serde_json::from_slice(&msg) {
-            Ok(msg) => Ok((msg, self)),
-            Err(e) => return Err(RecvError::DeserializeError(e, self)),
-        }
+        let msg = self.0.recv_string().await.map_err(TextJsonError::TextError)?;
+        serde_json::from_str(&msg).map_err(TextJsonError::DeserializeError)
     }
 
-    async fn recv_borrowed_message<T, F, O>(mut self, f: F) -> Result<(O, Self), RecvError<Self>>
-    where
-        for<'a> T: Deserialize<'a>,
-        F: FnOnce(T) -> O + Send,
-    {
-        let (msg, tmp) = self.0.recv_string().await.map_err(RecvError::IOError)?;
-        self.0 = tmp;
-
-        match serde_json::from_slice(&msg) {
-            Ok(msg) => Ok(((f)(msg), self)),
-            Err(e) => return Err(RecvError::DeserializeError(e, self)),
-        }
+    async fn send_message<T: Serialize + Send + Sync + 'static>(
+        &mut self,
+        msg: &T,
+    ) -> Result<(), Self::Error> {
+        self.0
+            .send_string(serde_json::to_string(&msg).unwrap())
+            .await
+            .map_err(TextJsonError::TextError)
     }
 
-    async fn send_message<T: Serialize + Sync>(mut self, msg: &T) -> Result<Self, std::io::Error> {
-        let tmp = self
-            .0
-            .send_string(serde_json::to_string(&msg).unwrap().into())
-            .await?;
-        self.0 = tmp;
-        Ok(self)
+    async fn wait_for_error(&mut self) -> Self::Error {
+        TextJsonError::TextError(self.0.wait_for_error().await)
     }
 }
 

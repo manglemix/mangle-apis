@@ -1,7 +1,9 @@
 use std::num::{NonZeroU16, TryFromIntError};
 
-use mangle_api_core::rand::{thread_rng, Rng};
-use mangle_api_core::webrtc::{RandomID, WebRTCSessionManager};
+use mangle_api_core::{
+    rand::{thread_rng, Rng},
+    webrtc::{RandomID, WebRTCSessionManager},
+};
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, derive_more::Display, Debug)]
 pub struct RoomCode(NonZeroU16);

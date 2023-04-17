@@ -4,8 +4,10 @@ use log::warn;
 use parking_lot::Mutex;
 
 use anyhow::Result;
-use axum::extract::{FromRef, Query, State};
-use axum::response::Html;
+use axum::{
+    extract::{FromRef, Query, State},
+    response::Html,
+};
 use oauth2::{
     basic::{BasicClient, BasicTokenType},
     reqwest::async_http_client,

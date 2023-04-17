@@ -80,7 +80,7 @@ impl DB {
 
     fn map_to_user_profile(map: &HashMap<String, AttributeValue>) -> Result<UserProfile, Error> {
         macro_rules! err {
-            ($field_name: literal) => {
+            ($field_name:literal) => {
                 anyhow!(
                     "Could not deserialize field: {} in user profile",
                     $field_name
@@ -88,13 +88,13 @@ impl DB {
             };
         }
         macro_rules! deser {
-            ($field: literal, $op: ident) => {
+            ($field:literal, $op:ident) => {
                 map.get($field)
                     .map(|x| x.$op())
                     .transpose()
                     .map_err(|_| err!($field))?
             };
-            (num $field: literal) => {
+            (num $field:literal) => {
                 deser!($field, as_n)
                     .map(|x| x.parse().map_err(|_| err!($field)))
                     .transpose()

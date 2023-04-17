@@ -14,14 +14,15 @@ use axum::{
 };
 use log::{error, warn};
 use mangle_api_core::{
+    self,
     auth::token::{TokenVerificationError, VerifiedToken},
-    neo_api::{APIConnectionManager, APIMessage, ConnectionLock},
     serde_json,
     webrtc::{
         ConnectionReceiver, ICECandidate, JoinSessionError, SDPAnswer, SDPOffer, SDPOfferStream,
     },
     ws::{ManagedWebSocket, WebSocketCode},
 };
+use messagist::{MessageStream, ExclusiveMessageHandler};
 use rustrict::CensorStr;
 use serde::{Deserialize, Serialize};
 use tokio::select;
@@ -41,7 +42,7 @@ struct LoggedIn {
     _conn_lock: ConnectionLock<Arc<String>>,
 }
 
-async fn webrtc_handle(
+async fn handle_webrtc(
     mut ws: ManagedWebSocket,
     handle: &mut ConnectionReceiver,
 ) -> Option<ManagedWebSocket> {
@@ -66,7 +67,7 @@ async fn webrtc_handle(
                 let Ok(msg) = WSAPIMessage::try_from(msg) else {
                     return ws.send("Bad Message")
                 };
-                let WSAPIMessageImpl::SDPAnswer { sdp_answer, ice_candidate } = msg.msg else {
+                let WSAPIMessage::SDPAnswer { sdp_answer, ice_candidate } = msg.msg else {
                     return ws.send("Bad Message")
                 };
                 let ice_recv = answer_stream.send_answer(sdp_answer.into(), ice_candidate.into());
@@ -128,10 +129,9 @@ fn default_lobby_size() -> usize {
 }
 
 #[derive(Deserialize)]
-enum WSAPIMessageImpl<'a> {
+enum WSAPIMessage {
     ScoreUpdateRequest {
-        #[serde(borrow)]
-        difficulty: &'a str,
+        difficulty: String,
         score: u16,
     },
     Logout,
@@ -158,34 +158,25 @@ enum WSAPIMessageImpl<'a> {
     },
 }
 
-pub struct WSAPIMessage {
-    // str will not move, thus making this self referential struct safe
-    _data: Pin<Box<(PhantomPinned, str)>>,
-    msg: WSAPIMessageImpl<'static>,
+
+pub struct WsApiHandlerImpl {
+
 }
 
-impl TryFrom<String> for WSAPIMessage {
-    type Error = String;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        let data = value.into_boxed_str();
-        let data: Pin<Box<(PhantomPinned, str)>> = unsafe { transmute(data) };
-
-        Ok(Self {
-            // SAFETY: Ref to data will live for as long as this struct exists,
-            // and the data will not be modified
-            // This transmute makes the lifetimes work
-            msg: serde_json::from_str(unsafe { transmute(data.deref()) })
-                .map_err(|_| "Bad Request")?,
-            _data: data,
-        })
-    }
+#[derive(Clone)]
+pub struct WsApiHandler {
+    inner: Arc<WsApiHandlerImpl>
 }
+
 
 #[async_trait]
-impl APIMessage for WSAPIMessage {
-    type FirstConnectionState = FirstConnectionState;
-    type SessionState = SessionState;
+impl ExclusiveMessageHandler for WsApiHandler {
+    type Error = !;
+
+    async fn handle<S: MessageStream + Send>(&mut self, stream: S) -> Result<(), Self::Error> {
+        
+    }
 
     async fn on_connection(
         session_state: FirstConnectionState,
@@ -373,7 +364,7 @@ impl APIMessage for WSAPIMessage {
                 let (mut handle, code) = multiplayer.host_session_random_id(max_size);
                 ws = ws.send(code.to_string())?;
 
-                webrtc_handle(ws, &mut handle).await
+                handle_webrtc(ws, &mut handle).await
             }
             WSAPIMessageImpl::StartJoinSession(code) => {
                 let Ok(code) = RoomCode::try_from(code) else {
@@ -472,7 +463,7 @@ impl APIMessage for WSAPIMessage {
                     ice_sender.send(ice.into()).await;
                 }
 
-                webrtc_handle(ws, &mut handle).await
+                handle_webrtc(ws, &mut handle).await
             }
             WSAPIMessageImpl::JoinSessionSDPOffers(_)
             | WSAPIMessageImpl::JoinSessionICE { .. }

@@ -2,15 +2,18 @@
 #![feature(string_leak)]
 #![feature(map_try_insert)]
 #![feature(vec_push_within_capacity)]
+#![feature(never_type)]
 
 use std::{fs::read_to_string, sync::Arc, time::Duration};
 
 use anyhow::{self, Context};
 use axum::{
+    async_trait,
     extract::FromRef,
     http::{HeaderValue, StatusCode},
     response::Response,
 };
+use control::new_control_handler;
 use db::DB;
 use leaderboard::Leaderboard;
 use log::info;
@@ -24,14 +27,21 @@ use mangle_api_core::{
         token::{HeaderTokenGranterConfig, TokenGranter, TokenGranterConfig},
     },
     distributed::Node,
-    get_https_credentials, get_pipe_name, make_app,
-    neo_api::{ws_api_route, APIConnectionManager},
-    pre_matches, setup_logger, start_api, BaseConfig,
+    get_https_credentials,
+    get_pipe_name,
+    make_app,
+    new_api,
+    // neo_api::{ws_api_route},
+    pre_matches,
+    setup_logger,
+    CommandMatchResult,
 };
+use messagist::{pipes::start_connection, MessageStream};
 use multiplayer::Multiplayer;
 use tokio::{self};
 
 mod config;
+mod control;
 mod db;
 mod leaderboard;
 mod multiplayer;
@@ -41,7 +51,9 @@ mod ws_api;
 
 use config::Config;
 use tournament::Tournament;
-use ws_api::{FirstConnectionState, SessionState, WSAPIMessage};
+
+use crate::control::ControlClientMessage;
+// use ws_api::{FirstConnectionState, SessionState, WSAPIMessage};
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct LoginTokenData {
@@ -72,7 +84,7 @@ struct GlobalState {
     auth_pages: AuthPages,
     login_tokens: LoginTokenGranter,
     leaderboard: Leaderboard,
-    api_conn_manager: APIConnectionManager<Arc<String>>,
+    // api_conn_manager: APIConnectionManager<Arc<String>>,
     tournament: Tournament,
     multiplayer: Multiplayer,
 }
@@ -80,12 +92,33 @@ struct GlobalState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let app = make_app("BolaAPI", env!("CARGO_PKG_VERSION"), "The API for Bola", []);
+    let matches = app.get_matches();
 
     let pipe_name = get_pipe_name("BOLA_SOCKET_NAME", "/dev/bola_server.sock");
 
-    let Some(config) = pre_matches::<Config>(app.clone(), &pipe_name).await? else {
-        return Ok(())
+    let config = match pre_matches::<Config>(&matches, pipe_name.as_os_str(), None).await? {
+        CommandMatchResult::StartProgram(x) => x,
+        CommandMatchResult::Unmatched(x) => match x {
+            ("stop", _) => {
+                let mut conn = start_connection(pipe_name)
+                    .await
+                    .context("Connecting to server")?;
+                conn.send_message(&ControlClientMessage::Stop)
+                    .await
+                    .context("Sending Stop to server")?;
+                println!("Stop command issued...");
+                conn.wait_for_error().await;
+                println!("Server stopped succesfully");
+                return Ok(());
+            }
+            _ => unreachable!(),
+        },
     };
+
+    let builder = aws_config::from_env();
+    #[cfg(debug_assertions)]
+    let builder = builder.region(aws_types::region::Region::from_static("us-east-2"));
+    let aws_config = builder.load().await;
 
     setup_logger(
         &config.stderr_log,
@@ -128,11 +161,6 @@ async fn main() -> anyhow::Result<()> {
     let late_page =
         read_to_string(&config.late_path).context(format!("Reading {}", config.late_path))?;
 
-    let builder = aws_config::from_env();
-    #[cfg(debug_assertions)]
-    let builder = builder.region(aws_types::region::Region::from_static("us-east-2"));
-    let aws_config = builder.load().await;
-
     let oidc_state = OIDCState::default();
 
     let node = Node::new(
@@ -161,15 +189,19 @@ async fn main() -> anyhow::Result<()> {
         login_tokens: LoginTokenGranter::new(config.token_duration),
         leaderboard: Leaderboard::new(db.clone(), node, 5).await?,
         db,
-        api_conn_manager: APIConnectionManager::new(WS_PING_DELAY),
+        // api_conn_manager: APIConnectionManager::new(WS_PING_DELAY),
         tournament: Tournament::new(config.start_week_time),
         multiplayer: Multiplayer::default(),
     };
 
-    let config = BaseConfig {
-        api_token: HeaderValue::from_str(&config.api_token).context("parsing api_token")?,
-        bind_address: config.bind_address,
-        cors_allowed_methods: {
+    let (control_handler, control_handler_recv) = new_control_handler();
+
+    let api = new_api()
+        .set_state(state)
+        .set_pipe_name(pipe_name)
+        .set_api_token(HeaderValue::from_str(&config.api_token).context("parsing api_token")?)
+        .set_bind_address(config.bind_address)
+        .set_cors_allowed_methods({
             let mut out = Vec::new();
 
             config
@@ -178,8 +210,8 @@ async fn main() -> anyhow::Result<()> {
                 .try_for_each(|x| x.parse().map(|x| out.push(x)))?;
 
             out
-        },
-        cors_allowed_origins: {
+        })
+        .set_cors_allowed_origins({
             let mut out = Vec::new();
 
             config
@@ -188,16 +220,9 @@ async fn main() -> anyhow::Result<()> {
                 .try_for_each(|x| x.parse().map(|x| out.push(x)))?;
 
             out
-        },
-    };
-
-    start_api(
-        state,
-        app,
-        pipe_name,
-        config,
-        ["^/oidc/", "^/manglemix.css$", "^/$"],
-        [
+        })
+        .set_public_paths(["^/oidc/", "^/manglemix.css$", "^/$"])
+        .set_routes([
             ("/oidc/redirect", openid_redirect()),
             (
                 "/manglemix.css",
@@ -208,10 +233,10 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap()
                 }),
             ),
-            (
-                "/ws_api",
-                ws_api_route::<FirstConnectionState, SessionState, WSAPIMessage, _, _, _>(),
-            ),
+            // (
+            //     "/ws_api",
+            //     ws_api_route::<FirstConnectionState, SessionState, WSAPIMessage, _, _, _>(),
+            // ),
             (
                 "/",
                 axum::routing::get(|| async move {
@@ -222,8 +247,13 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap()
                 }),
             ),
-        ],
-        https_der,
-    )
-    .await
+        ])
+        .set_control_handler(control_handler)
+        .set_concurrent_future(control_handler_recv);
+
+    if let Some(https_der) = https_der {
+        api.set_https_identity(https_der).run().await
+    } else {
+        api.run().await
+    }
 }

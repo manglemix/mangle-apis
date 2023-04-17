@@ -1,135 +1,86 @@
-use async_bincode::tokio::{AsyncBincodeReader, AsyncBincodeWriter};
 use async_trait::async_trait;
-use bincode::ErrorKind;
-// use bincode::ErrorKind;
-use futures::{SinkExt, StreamExt};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncWrite};
+use serde::{de::DeserializeOwned, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::{MessageStream, RecvError};
+use crate::{MessageStream};
 
-pub struct BinaryMessageStream<T: AsyncRead + AsyncWrite + Unpin + Send>(T);
+pub struct BinaryMessageStream<T: AsyncRead + AsyncWrite + Unpin + Send>(pub(crate) T);
+
+
+#[derive(thiserror::Error, Debug, derive_more::From)]
+pub enum BinaryError {
+    #[error("IOError {0}")]
+    IOError(std::io::Error),
+    #[error("DeserializeError {0}")]
+    DeserializeError(bincode::Error)
+}
+
 
 #[async_trait]
 impl<T> MessageStream for BinaryMessageStream<T>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    type DeserializeError = bincode::Error;
+    type Error = BinaryError;
 
-    async fn recv_message<M>(mut self) -> Result<(M, Self), RecvError<Self>>
+    async fn recv_message<M>(&mut self) -> Result<M, Self::Error>
     where
-        M: DeserializeOwned + Send,
+        M: DeserializeOwned + Send + 'static,
     {
-        let mut reader = AsyncBincodeReader::from(self.0);
-        match reader.next().await {
-            Some(Ok(msg)) => {
-                self.0 = reader.into_inner();
-                Ok((msg, self))
-            }
-            None => Err(RecvError::IOError(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "Connection Closed",
-            ))),
-            Some(Err(e)) => {
-                self.0 = reader.into_inner();
-                Err(RecvError::DeserializeError(e, self))
-            }
+        let mut size_byte_count = [0u8];
+        self.0.read_exact(&mut size_byte_count).await?;
+        let size_byte_count = size_byte_count[0] as usize;
+
+        let usize_size = (usize::BITS / 8) as usize;
+
+        if size_byte_count > usize_size {
+            return Err(BinaryError::DeserializeError(Box::new(
+                bincode::ErrorKind::SizeLimit,
+            )));
         }
-        // let mut final_buf = vec![];
-        // loop {
-        //     let size: usize = self.0.read_u16().await.map_err(RecvError::IOError)? as usize;
-        //     let mut buf = vec![0; size];
-        //     self.0
-        //         .read_exact(&mut buf)
-        //         .await
-        //         .map_err(RecvError::IOError)?;
-        //     final_buf.append(&mut buf);
 
-        //     if size < u16::MAX as usize {
-        //         break;
-        //     }
-        // }
+        let mut buf = vec![0; usize_size];
+        let filled_half = buf.split_at_mut(size_byte_count).0;
+        self.0.read_exact(filled_half).await?;
+        let size = usize::from_le_bytes(buf.as_slice().try_into().unwrap());
 
-        // match bincode::deserialize(&final_buf) {
-        //     Ok(msg) => Ok((msg, self)),
-        //     Err(e) => return Err(RecvError::DeserializeError(e, self)),
-        // }
+        buf.resize(size, 0);
+        self.0.read_exact(&mut buf).await?;
+
+        bincode::deserialize(&buf).map_err(Into::into)
     }
 
-    async fn recv_borrowed_message<M, F, O>(mut self, f: F) -> Result<(O, Self), RecvError<Self>>
-    where
-        for<'a> M: Deserialize<'a> + Send,
-        F: FnOnce(M) -> O + Send,
-    {
-        let mut reader = AsyncBincodeReader::from(self.0);
-        match reader.next().await {
-            Some(Ok(msg)) => {
-                self.0 = reader.into_inner();
-                Ok(((f)(msg), self))
-            }
-            None => Err(RecvError::IOError(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "Connection Closed",
-            ))),
-            Some(Err(e)) => {
-                self.0 = reader.into_inner();
-                Err(RecvError::DeserializeError(e, self))
+    async fn send_message<M: Serialize + Send + Sync + 'static>(
+        &mut self,
+        msg: &M,
+    ) -> Result<(), Self::Error> {
+        let mut data = bincode::serialize(&msg).unwrap();
+        let size = data.len();
+        let mut size_vec = size.to_le_bytes().to_vec();
+
+        // trim trailing zeroes
+        for i in (0..size_vec.len()).rev() {
+            if size_vec[i] > 0 {
+                size_vec.resize(i + 1, 0);
+                break;
             }
         }
-        // let mut final_buf = vec![];
-        // loop {
-        //     let size: usize = self.0.read_u16().await.map_err(RecvError::IOError)? as usize;
-        //     let mut buf = vec![0; size];
-        //     self.0
-        //         .read_exact(&mut buf)
-        //         .await
-        //         .map_err(RecvError::IOError)?;
-        //     final_buf.append(&mut buf);
 
-        //     if size < u16::MAX as usize {
-        //         break;
-        //     }
-        // }
+        let mut final_buf = size_vec;
+        final_buf.insert(0, final_buf.len() as u8);
 
-        // match bincode::deserialize(&final_buf) {
-        //     Ok(msg) => Ok(((f)(msg), self)),
-        //     Err(e) => return Err(RecvError::DeserializeError(e, self)),
-        // }
+        final_buf.append(&mut data);
+
+        self.0.write_all(&final_buf).await?;
+        Ok(())
     }
 
-    async fn send_message<M: Serialize + Sync>(mut self, msg: &M) -> Result<Self, std::io::Error> {
-        let mut writer = AsyncBincodeWriter::from(self.0);
-        if let Err(e) = writer.send(msg).await {
-            return match Box::into_inner(e) {
-                ErrorKind::Io(e) => Err(e),
-                _ => unreachable!(),
-            };
+    async fn wait_for_error(&mut self) -> Self::Error {
+        loop {
+            let mut buf = [0; 16];
+            let Err(e) = self.0.read(&mut buf).await else { continue };
+            break e.into();
         }
-        if let Err(e) = writer.flush().await {
-            return match Box::into_inner(e) {
-                ErrorKind::Io(e) => Err(e),
-                _ => unreachable!(),
-            };
-        }
-        self.0 = writer.into_inner();
-        Ok(self)
-        // let mut bytes: VecDeque<u8> = bincode::serialize(&msg).unwrap().into();
-
-        // loop {
-        //     if bytes.len() >= u16::MAX as usize {
-        //         self.0.write_u16(u16::MAX).await?;
-        //         let tmp = bytes.split_off(u16::MAX as usize);
-        //         let to_send = replace(&mut bytes, tmp);
-        //         self.0.write_all(to_send.as_slices().0).await?;
-        //     } else {
-        //         self.0.write_u16(bytes.len() as u16).await?;
-        //         self.0.write_all(bytes.as_slices().0).await?;
-        //         break;
-        //     }
-        // }
-
-        // Ok(self)
     }
 }
 

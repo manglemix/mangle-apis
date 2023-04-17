@@ -22,3 +22,4 @@ log = { workspace = true }
 rustrict = "0.5.13"
 serde = { workspace = true }
 dashmap = "5.4.0"
+messagist = { path = "../messagist" }

@@ -1,0 +1,15 @@
+services:
+  builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    volumes:
+      - type: bind
+        source: .
+        target: /bola
+
+    working_dir: /bola
+    network_mode: host
+
+    command: ["./bola-api", "start"]

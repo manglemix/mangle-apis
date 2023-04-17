@@ -65,21 +65,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bddcadddf5e9015d310179a59bb28c4d4b9920ad0f11e8e14dbadf654890c9a6"
 
 [[package]]
-name = "async-bincode"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5601906cc87c2177c9a90617e66769aca8b334a4cd8111e951bf6afd84ba5cc"
-dependencies = [
- "bincode",
- "byteorder",
- "bytes",
- "futures-core",
- "futures-sink",
- "serde",
- "tokio",
-]
-
-[[package]]
 name = "async-channel"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -629,6 +614,7 @@ dependencies = [
  "derive_more",
  "log",
  "mangle-api-core",
+ "messagist",
  "rustrict",
  "serde",
  "tokio",
@@ -1608,6 +1594,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "tokio-native-tls",
  "tokio-stream",
@@ -1615,6 +1602,10 @@ dependencies = [
  "tower",
  "tower-http",
 ]
+
+[[package]]
+name = "manglext"
+version = "0.1.0"
 
 [[package]]
 name = "matches"
@@ -1638,7 +1629,6 @@ checksum = "2dffe52ecf27772e601905b7522cb4ef790d2cc203488bbd0e2fe85fcb74566d"
 name = "messagist"
 version = "0.1.0"
 dependencies = [
- "async-bincode",
  "async-trait",
  "axum",
  "bincode",
@@ -1646,9 +1636,12 @@ dependencies = [
  "futures",
  "futures-io",
  "interprocess",
+ "log",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2489,22 +2482,22 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.38"
+version = "1.0.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a9cd18aa97d5c45c6603caea1da6628790b37f7a34b6ca89522331c5180fed0"
+checksum = "978c9a314bd8dc99be594bc3c175faaa9794be04a5a5e153caba6915336cebac"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "1.0.38"
+version = "1.0.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fb327af4685e4d03fa8cbcf1716380da910eeb2bb8be417e7f9fd3fb164f36f"
+checksum = "f9456a42c5b0d803c8cd86e73dd7cc9edd429499f37a3550d286d5e86720569f"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 1.0.109",
+ "syn 2.0.13",
 ]
 
 [[package]]
@@ -2647,6 +2640,7 @@ checksum = "5427d89453009325de0d8f342c9490009f76e999cb7672d77e46267448f7e6b2"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "pin-project-lite",
  "tokio",
