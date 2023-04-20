@@ -1,7 +1,8 @@
 use std::{future::Future, pin::Pin};
 
 use axum::async_trait;
-use messagist::{ExclusiveMessageHandler, MessageStream};
+use log::error;
+use messagist::{ExclusiveMessageHandler, MessageStream, pipes::ListenerErrorHandler};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -41,15 +42,28 @@ pub fn new_control_handler() -> (ControlHandler, ControlHandlerReceiver) {
 
 #[async_trait]
 impl ExclusiveMessageHandler for ControlHandler {
-    type Error = anyhow::Error;
+    type SessionState = ();
 
-    async fn handle<S: MessageStream + Send>(&mut self, mut stream: S) -> Result<(), Self::Error> {
-        let msg: ControlClientMessage = stream.recv_message().await?;
+    async fn handle<S: MessageStream + Send>(&mut self, mut stream: S, _session_state: Self::SessionState) {
+        let msg: ControlClientMessage = match stream.recv_message().await {
+            Ok(x) => x,
+            Err(e) => {
+                error!("Error receiving message: {e}");
+                return
+            }
+        };
         match msg {
             ControlClientMessage::Stop => {
                 let _ = self.stop_sender.send(()).await;
-                Ok(())
             }
         }
+    }
+}
+
+
+#[async_trait]
+impl ListenerErrorHandler for ControlHandler {
+    async fn handle_error(&self, err: std::io::Error) {
+        error!("Error accepting stream: {err}")
     }
 }

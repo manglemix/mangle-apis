@@ -34,7 +34,7 @@ use mangle_api_core::{
     // neo_api::{ws_api_route},
     pre_matches,
     setup_logger,
-    CommandMatchResult,
+    CommandMatchResult, neo_api::{ws_api_route, NeoApiConfig},
 };
 use messagist::{pipes::start_connection, MessageStream};
 use multiplayer::Multiplayer;
@@ -51,6 +51,7 @@ mod ws_api;
 
 use config::Config;
 use tournament::Tournament;
+use ws_api::{WsApiHandler, SessionState};
 
 use crate::control::ControlClientMessage;
 // use ws_api::{FirstConnectionState, SessionState, WSAPIMessage};
@@ -84,7 +85,7 @@ struct GlobalState {
     auth_pages: AuthPages,
     login_tokens: LoginTokenGranter,
     leaderboard: Leaderboard,
-    // api_conn_manager: APIConnectionManager<Arc<String>>,
+    ws_api: NeoApiConfig<WsApiHandler>,
     tournament: Tournament,
     multiplayer: Multiplayer,
 }
@@ -103,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut conn = start_connection(pipe_name)
                     .await
                     .context("Connecting to server")?;
-                conn.send_message(&ControlClientMessage::Stop)
+                conn.send_message(ControlClientMessage::Stop)
                     .await
                     .context("Sending Stop to server")?;
                 println!("Stop command issued...");
@@ -171,14 +172,19 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     let db = DB::new(&aws_config, config.bola_profiles_table);
 
+    let goidc = new_google_oidc_from_file(
+        config.google_client_secret_path,
+        oidc_state.clone(),
+        &(config.oidc_redirect_base + "/oidc/redirect"),
+    )
+    .await
+    .context("parsing google oauth")?;
+
+    let leaderboard = Leaderboard::new(db.clone(), node, 5).await?;
+    let login_tokens = LoginTokenGranter::new(config.token_duration);
+
     let state = GlobalState {
-        goidc: new_google_oidc_from_file(
-            config.google_client_secret_path,
-            oidc_state.clone(),
-            &(config.oidc_redirect_base + "/oidc/redirect"),
-        )
-        .await
-        .context("parsing google oauth")?,
+        goidc: goidc.clone(),
         auth_pages: AuthPages::new(AuthPagesSrc {
             internal_error: internal_error_page,
             late: late_page,
@@ -186,12 +192,13 @@ async fn main() -> anyhow::Result<()> {
             success: success_page,
         }),
         oidc_state,
-        login_tokens: LoginTokenGranter::new(config.token_duration),
-        leaderboard: Leaderboard::new(db.clone(), node, 5).await?,
-        db,
+        login_tokens: login_tokens.clone(),
+        leaderboard: leaderboard.clone(),
+        db: db.clone(),
         // api_conn_manager: APIConnectionManager::new(WS_PING_DELAY),
         tournament: Tournament::new(config.start_week_time),
         multiplayer: Multiplayer::default(),
+        ws_api: NeoApiConfig::new(WS_PING_DELAY, WsApiHandler::new(leaderboard, db, goidc.0, login_tokens))
     };
 
     let (control_handler, control_handler_recv) = new_control_handler();
@@ -233,10 +240,10 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap()
                 }),
             ),
-            // (
-            //     "/ws_api",
-            //     ws_api_route::<FirstConnectionState, SessionState, WSAPIMessage, _, _, _>(),
-            // ),
+            (
+                "/ws_api",
+                ws_api_route::<_, _, WsApiHandler, SessionState>(),
+            ),
             (
                 "/",
                 axum::routing::get(|| async move {

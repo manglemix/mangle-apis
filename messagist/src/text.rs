@@ -1,21 +1,18 @@
-use std::pin::Pin;
-
 use async_trait::async_trait;
-use serde::{de::DeserializeOwned, Serialize, Deserialize};
+use serde::{de::DeserializeOwned, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::{MessageStream, bin::BinaryError};
-
+use crate::{bin::BinaryError, MessageStream};
 
 #[cfg(feature = "bin")]
-use crate::bin::{BinaryMessageStream};
+use crate::bin::BinaryMessageStream;
 
 #[derive(thiserror::Error, Debug, derive_more::From)]
 pub enum BinaryJsonError {
     #[error("IOError {0}")]
     IOError(std::io::Error),
     #[error("DeserializeError {0}")]
-    DeserializeError(serde_json::Error)
+    DeserializeError(serde_json::Error),
 }
 
 #[async_trait]
@@ -40,29 +37,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> MessageStream
     where
         T: DeserializeOwned + Send + 'static,
     {
-        let data: Vec<u8> = self.0
-            .recv_message()
-            .await
-            .map_err(|e| match e {
-                BinaryError::DeserializeError(_) => unreachable!(),
-                BinaryError::IOError(e) => e
-            })?;
-        
-        serde_json::from_slice(&data)
-            .map_err(Into::into)
+        let data: Vec<u8> = self.0.recv_message().await.map_err(|e| match e {
+            BinaryError::DeserializeError(_) => unreachable!(),
+            BinaryError::IOError(e) => e,
+        })?;
+
+        serde_json::from_slice(&data).map_err(Into::into)
     }
 
-    async fn send_message<T: Serialize + Send + Sync + 'static>(
+    async fn send_message<T: Serialize + Send + Sync>(
         &mut self,
-        msg: &T,
+        msg: T,
     ) -> Result<(), Self::Error> {
-        self
-            .0
-            .send_message(&serde_json::to_vec(&msg).unwrap())
+        self.0
+            .send_message::<Vec<u8>>(serde_json::to_vec(&msg).unwrap())
             .await
             .map_err(|e| match e {
                 BinaryError::DeserializeError(_) => unreachable!(),
-                BinaryError::IOError(e) => e.into()
+                BinaryError::IOError(e) => e.into(),
             })
     }
 
@@ -77,15 +69,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> MessageStream
     }
 }
 
-
 #[derive(thiserror::Error, Debug)]
 pub enum TextJsonError<E: std::error::Error> {
     #[error("TextError {0}")]
     TextError(E),
     #[error("DeserializeError {0}")]
-    DeserializeError(serde_json::Error)
+    DeserializeError(serde_json::Error),
 }
-
 
 #[async_trait]
 impl<S: TextStream<Error: Sync> + Send + Sync> MessageStream for JsonMessageStream<S> {
@@ -95,13 +85,17 @@ impl<S: TextStream<Error: Sync> + Send + Sync> MessageStream for JsonMessageStre
     where
         T: DeserializeOwned + Send,
     {
-        let msg = self.0.recv_string().await.map_err(TextJsonError::TextError)?;
+        let msg = self
+            .0
+            .recv_string()
+            .await
+            .map_err(TextJsonError::TextError)?;
         serde_json::from_str(&msg).map_err(TextJsonError::DeserializeError)
     }
 
-    async fn send_message<T: Serialize + Send + Sync + 'static>(
+    async fn send_message<T: Serialize + Send + Sync>(
         &mut self,
-        msg: &T,
+        msg: T,
     ) -> Result<(), Self::Error> {
         self.0
             .send_string(serde_json::to_string(&msg).unwrap())

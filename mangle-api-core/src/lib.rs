@@ -20,7 +20,7 @@ use clap::{arg, builder::IntoResettable, ArgMatches, Command};
 use lers::{solver::Http01Solver, Directory, LETS_ENCRYPT_PRODUCTION_URL};
 use messagist::{
     pipes::{
-        start_connection, start_listener, DefaultListenerErrorHandler, ListenerErrorHandler,
+        start_connection, start_listener, ListenerErrorHandler,
         ToLocalSocketName,
     },
     ExclusiveMessageHandler,
@@ -28,7 +28,7 @@ use messagist::{
 use std::future::{pending, Future};
 
 use fern::{log_file, Dispatch};
-use log::{error, warn, LevelFilter, info};
+use log::{error, info, warn, LevelFilter};
 use parking_lot::Mutex;
 use regex::{Regex, RegexSet};
 use serde::{de::DeserializeOwned, Deserialize};
@@ -344,7 +344,6 @@ pub struct API<
     const N1: usize = 0,
     const N2: usize = 0,
     H = Unset,
-    F = DefaultListenerErrorHandler,
     Fut = Pending<()>,
 > {
     state: S,
@@ -357,12 +356,11 @@ pub struct API<
     routes: [(&'static str, MethodRouter<S>); N2],
     https_identity: Option<Identity>,
     control_handler: H,
-    control_listener_error_handler: F,
     concurrent_fut: Fut,
 }
 
 pub fn new_api(
-) -> API<Unset, Unset, Unset, Unset, 0, 0, Unset, DefaultListenerErrorHandler, Pending<()>> {
+) -> API<Unset, Unset, Unset, Unset, 0, 0, Unset, Pending<()>> {
     API {
         state: Unset,
         pipe_name: Unset,
@@ -374,18 +372,17 @@ pub fn new_api(
         routes: [],
         https_identity: None,
         control_handler: Unset,
-        control_listener_error_handler: DefaultListenerErrorHandler,
         concurrent_fut: pending(),
     }
 }
 
-impl<S, P, AT, BO, const N1: usize, const N2: usize, H, F, Fut>
-    API<S, P, AT, BO, N1, N2, H, F, Fut>
+impl<S, P, AT, BO, const N1: usize, const N2: usize, H, Fut>
+    API<S, P, AT, BO, N1, N2, H, Fut>
 {
     /// Sets the state used by this API
     /// # Warning
     /// Setting the state removes all existing routes
-    pub fn set_state<S2>(self, state: S2) -> API<S2, P, AT, BO, N1, 0, H, F, Fut>
+    pub fn set_state<S2>(self, state: S2) -> API<S2, P, AT, BO, N1, 0, H, Fut>
     where
         S2: Clone + Send + Sync + 'static,
     {
@@ -400,11 +397,10 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, F, Fut>
             routes: [],
             https_identity: self.https_identity,
             control_handler: self.control_handler,
-            control_listener_error_handler: self.control_listener_error_handler,
             concurrent_fut: self.concurrent_fut,
         }
     }
-    pub fn set_pipe_name(self, pipe_name: OsString) -> API<S, OsString, AT, BO, N1, N2, H, F, Fut> {
+    pub fn set_pipe_name(self, pipe_name: OsString) -> API<S, OsString, AT, BO, N1, N2, H, Fut> {
         API {
             state: self.state,
             pipe_name,
@@ -416,14 +412,13 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, F, Fut>
             routes: self.routes,
             https_identity: self.https_identity,
             control_handler: self.control_handler,
-            control_listener_error_handler: self.control_listener_error_handler,
             concurrent_fut: self.concurrent_fut,
         }
     }
     pub fn set_cors_allowed_methods(
         self,
         cors_allowed_methods: impl Into<AllowMethods>,
-    ) -> API<S, P, AT, BO, N1, N2, H, F, Fut> {
+    ) -> API<S, P, AT, BO, N1, N2, H, Fut> {
         API {
             state: self.state,
             pipe_name: self.pipe_name,
@@ -435,14 +430,13 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, F, Fut>
             routes: self.routes,
             https_identity: self.https_identity,
             control_handler: self.control_handler,
-            control_listener_error_handler: self.control_listener_error_handler,
             concurrent_fut: self.concurrent_fut,
         }
     }
     pub fn set_cors_allowed_origins(
         self,
         cors_allowed_origins: impl Into<AllowOrigin>,
-    ) -> API<S, P, AT, BO, N1, N2, H, F, Fut> {
+    ) -> API<S, P, AT, BO, N1, N2, H, Fut> {
         API {
             state: self.state,
             pipe_name: self.pipe_name,
@@ -454,14 +448,13 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, F, Fut>
             routes: self.routes,
             https_identity: self.https_identity,
             control_handler: self.control_handler,
-            control_listener_error_handler: self.control_listener_error_handler,
             concurrent_fut: self.concurrent_fut,
         }
     }
     pub fn set_api_token(
         self,
         api_token: HeaderValue,
-    ) -> API<S, P, HeaderValue, BO, N1, N2, H, F, Fut> {
+    ) -> API<S, P, HeaderValue, BO, N1, N2, H, Fut> {
         API {
             state: self.state,
             pipe_name: self.pipe_name,
@@ -473,14 +466,13 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, F, Fut>
             routes: self.routes,
             https_identity: self.https_identity,
             control_handler: self.control_handler,
-            control_listener_error_handler: self.control_listener_error_handler,
             concurrent_fut: self.concurrent_fut,
         }
     }
     pub fn set_bind_address(
         self,
         bind_address: BindAddress,
-    ) -> API<S, P, AT, BindAddress, N1, N2, H, F, Fut> {
+    ) -> API<S, P, AT, BindAddress, N1, N2, H, Fut> {
         API {
             state: self.state,
             pipe_name: self.pipe_name,
@@ -492,14 +484,13 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, F, Fut>
             routes: self.routes,
             https_identity: self.https_identity,
             control_handler: self.control_handler,
-            control_listener_error_handler: self.control_listener_error_handler,
             concurrent_fut: self.concurrent_fut,
         }
     }
     pub fn set_public_paths<const N1_2: usize>(
         self,
         public_paths: [&'static str; N1_2],
-    ) -> API<S, P, AT, BO, N1_2, N2, H, F, Fut> {
+    ) -> API<S, P, AT, BO, N1_2, N2, H, Fut> {
         API {
             state: self.state,
             pipe_name: self.pipe_name,
@@ -511,14 +502,13 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, F, Fut>
             routes: self.routes,
             https_identity: self.https_identity,
             control_handler: self.control_handler,
-            control_listener_error_handler: self.control_listener_error_handler,
             concurrent_fut: self.concurrent_fut,
         }
     }
     pub fn set_routes<const N2_2: usize>(
         self,
         routes: [(&'static str, MethodRouter<S>); N2_2],
-    ) -> API<S, P, AT, BO, N1, N2_2, H, F, Fut> {
+    ) -> API<S, P, AT, BO, N1, N2_2, H, Fut> {
         API {
             state: self.state,
             pipe_name: self.pipe_name,
@@ -530,14 +520,13 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, F, Fut>
             routes,
             https_identity: self.https_identity,
             control_handler: self.control_handler,
-            control_listener_error_handler: self.control_listener_error_handler,
             concurrent_fut: self.concurrent_fut,
         }
     }
     pub fn set_https_identity(
         self,
         https_identity: Identity,
-    ) -> API<S, P, AT, BO, N1, N2, H, F, Fut> {
+    ) -> API<S, P, AT, BO, N1, N2, H, Fut> {
         API {
             state: self.state,
             pipe_name: self.pipe_name,
@@ -549,16 +538,18 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, F, Fut>
             routes: self.routes,
             https_identity: Some(https_identity),
             control_handler: self.control_handler,
-            control_listener_error_handler: self.control_listener_error_handler,
             concurrent_fut: self.concurrent_fut,
         }
     }
     pub fn set_control_handler<H2>(
         self,
         control_handler: H2,
-    ) -> API<S, P, AT, BO, N1, N2, H2, F, Fut>
+    ) -> API<S, P, AT, BO, N1, N2, H2, Fut>
     where
-        H2: ExclusiveMessageHandler<Error: Send + Sync + 'static> + Send + 'static,
+        H2: ExclusiveMessageHandler<SessionState = ()>
+            + Send
+            + ListenerErrorHandler
+            + 'static,
     {
         API {
             state: self.state,
@@ -571,37 +562,13 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, F, Fut>
             routes: self.routes,
             https_identity: self.https_identity,
             control_handler,
-            control_listener_error_handler: self.control_listener_error_handler,
-            concurrent_fut: self.concurrent_fut,
-        }
-    }
-    pub fn set_control_listener_error_handler<F2>(
-        self,
-        control_listener_error_handler: F2,
-    ) -> API<S, P, AT, BO, N1, N2, H, F2, Fut>
-    where
-        H: ExclusiveMessageHandler<Error: Send + Sync + 'static> + Send + 'static,
-        F2: ListenerErrorHandler<H>,
-    {
-        API {
-            state: self.state,
-            pipe_name: self.pipe_name,
-            cors_allowed_methods: self.cors_allowed_methods,
-            cors_allowed_origins: self.cors_allowed_origins,
-            api_token: self.api_token,
-            bind_address: self.bind_address,
-            public_paths: self.public_paths,
-            routes: self.routes,
-            https_identity: self.https_identity,
-            control_handler: self.control_handler,
-            control_listener_error_handler,
             concurrent_fut: self.concurrent_fut,
         }
     }
     pub fn set_concurrent_future<Fut2>(
         self,
         concurrent_fut: Fut2,
-    ) -> API<S, P, AT, BO, N1, N2, H, F, Fut2>
+    ) -> API<S, P, AT, BO, N1, N2, H, Fut2>
     where
         Fut2: Future,
     {
@@ -616,18 +583,16 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, F, Fut>
             routes: self.routes,
             https_identity: self.https_identity,
             control_handler: self.control_handler,
-            control_listener_error_handler: self.control_listener_error_handler,
             concurrent_fut,
         }
     }
 }
 
-impl<S, const N1: usize, const N2: usize, H, F, Fut>
-    API<S, OsString, HeaderValue, BindAddress, N1, N2, H, F, Fut>
+impl<S, const N1: usize, const N2: usize, H, Fut>
+    API<S, OsString, HeaderValue, BindAddress, N1, N2, H, Fut>
 where
     S: Clone + Send + Sync + 'static,
-    H: ExclusiveMessageHandler<Error: Send + Sync + 'static> + Send + 'static,
-    F: ListenerErrorHandler<H>,
+    H: ExclusiveMessageHandler<SessionState = ()> + Send + ListenerErrorHandler + 'static,
     Fut: Future,
 {
     pub async fn run(self) -> Result<()> {
@@ -635,7 +600,6 @@ where
         let control_listener = start_listener(
             self.pipe_name,
             self.control_handler,
-            self.control_listener_error_handler,
         )
         .context("Setting up control listener")?;
 

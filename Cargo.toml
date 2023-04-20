@@ -10,7 +10,7 @@ members = [
 tokio = { version = "1.23.0", features = ["rt", "signal", "macros", "net", "rt-multi-thread"] }
 anyhow = "1.0.68"
 
-axum = { version = "0.6.1", features = ["http2", "ws", "headers", "macros"] }
+axum = { version = "0.6.15", features = ["http2", "ws", "headers", "macros"] }
 
 log = "0.4"
 

@@ -6,20 +6,18 @@ use crate::{MessageStream};
 
 pub struct BinaryMessageStream<T: AsyncRead + AsyncWrite + Unpin + Send>(pub(crate) T);
 
-
 #[derive(thiserror::Error, Debug, derive_more::From)]
 pub enum BinaryError {
     #[error("IOError {0}")]
     IOError(std::io::Error),
     #[error("DeserializeError {0}")]
-    DeserializeError(bincode::Error)
+    DeserializeError(bincode::Error),
 }
-
 
 #[async_trait]
 impl<T> MessageStream for BinaryMessageStream<T>
 where
-    T: AsyncRead + AsyncWrite + Unpin + Send,
+    T: AsyncRead + AsyncWrite + AsyncWriteExt + Unpin + Send,
 {
     type Error = BinaryError;
 
@@ -50,9 +48,9 @@ where
         bincode::deserialize(&buf).map_err(Into::into)
     }
 
-    async fn send_message<M: Serialize + Send + Sync + 'static>(
+    async fn send_message<M: Serialize + Send + Sync>(
         &mut self,
-        msg: &M,
+        msg: M,
     ) -> Result<(), Self::Error> {
         let mut data = bincode::serialize(&msg).unwrap();
         let size = data.len();

@@ -3,10 +3,8 @@
 #![feature(associated_type_bounds)]
 // #![feature(box_into_inner)]
 
-use std::{pin::Pin, any::Any, ops::DerefMut};
-
 use async_trait::async_trait;
-use serde::{de::DeserializeOwned, Serialize, Deserialize, Deserializer};
+use serde::{de::DeserializeOwned, Serialize};
 
 #[cfg(feature = "bincode")]
 pub mod bin;
@@ -14,6 +12,36 @@ pub mod bin;
 pub mod pipes;
 #[cfg(feature = "json")]
 pub mod text;
+
+
+pub enum Ref<'a, T> {
+    Owned(T),
+    Borrowed(&'a T)
+}
+
+
+impl<'a, T> Ref<'a, T> {
+    pub fn get_ref(&self) -> &T {
+        match self {
+            Ref::Owned(x) => x,
+            Ref::Borrowed(x) => x,
+        }
+    }
+}
+
+
+impl<'a, T> From<T> for Ref<'a, T> {
+    fn from(value: T) -> Self {
+        Self::Owned(value)
+    }
+}
+
+
+impl<'a, T> From<&'a T> for Ref<'a, T> {
+    fn from(value: &'a T) -> Self {
+        Self::Borrowed(value)
+    }
+}
 
 
 #[async_trait]
@@ -24,35 +52,47 @@ pub trait MessageStream: Sized + Send {
     where
         T: DeserializeOwned + Send + 'static;
 
-    async fn send_message<T: Serialize + Send + Sync + 'static>(
+    async fn send_message<T: Serialize + Send + Sync>(
         &mut self,
-        msg: &T,
+        msg: T,
     ) -> Result<(), Self::Error>;
     async fn wait_for_error(&mut self) -> Self::Error;
 }
 
 #[async_trait]
 pub trait AliasableMessageHandler: Sized {
-    type Error;
+    type SessionState: Send;
 
-    async fn handle<S: MessageStream>(&self, stream: S) -> Result<(), Self::Error>;
+    async fn handle<S: MessageStream>(
+        &self,
+        stream: S,
+        session_state: Self::SessionState,
+    );
 }
 
 #[async_trait]
 pub trait ExclusiveMessageHandler: Sized {
-    type Error;
+    type SessionState: Send;
 
-    async fn handle<S: MessageStream>(&mut self, stream: S) -> Result<(), Self::Error>;
+    async fn handle<S: MessageStream>(
+        &mut self,
+        stream: S,
+        session_state: Self::SessionState,
+    );
 }
 
 #[async_trait]
 impl<H: AliasableMessageHandler + Send + Sync> ExclusiveMessageHandler for H {
-    type Error = <H as AliasableMessageHandler>::Error;
+    type SessionState = <H as AliasableMessageHandler>::SessionState;
 
-    async fn handle<S: MessageStream + Send>(&mut self, stream: S) -> Result<(), Self::Error> {
-        <H as AliasableMessageHandler>::handle(self, stream).await
+    async fn handle<S: MessageStream + Send>(
+        &mut self,
+        stream: S,
+        session_state: Self::SessionState,
+    ) {
+        <H as AliasableMessageHandler>::handle(self, stream, session_state).await;
     }
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests { }
