@@ -2,9 +2,9 @@ use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::Error;
 use bimap::BiMap;
-use log::{warn};
-use messagist::{bin::BinaryMessageStream, MessageStream, ExclusiveMessageHandler};
-use serde::{Serialize};
+use log::warn;
+use messagist::{bin::BinaryMessageStream, ExclusiveMessageHandler, MessageStream};
+use serde::Serialize;
 use tokio::{
     net::{TcpListener, TcpStream},
     spawn,
@@ -15,54 +15,50 @@ use tokio_native_tls::{
     TlsAcceptor as TlsAcceptorWrapper, TlsConnector as TlsConnectorWrapper,
 };
 
-
 pub struct ServerName(pub Arc<str>);
-
 
 pub struct Node<H>
 where
-    H: ExclusiveMessageHandler<SessionState = ServerName> + Clone + Send + Sync + 'static
+    H: ExclusiveMessageHandler<SessionState = ServerName> + Clone + Send + Sync + 'static,
 {
     sibling_domains: Arc<BiMap<Arc<str>, SocketAddr>>,
     tls_builder: Option<TlsConnectorWrapper>,
     network_port: u16,
     task_handle: JoinHandle<()>,
-    handler: H
+    handler: H,
 }
 
 impl<H> Drop for Node<H>
 where
-    H: ExclusiveMessageHandler<SessionState = ServerName> + Clone + Send + Sync + 'static
+    H: ExclusiveMessageHandler<SessionState = ServerName> + Clone + Send + Sync + 'static,
 {
     fn drop(&mut self) {
         self.task_handle.abort();
     }
 }
 
-
 impl<H> Node<H>
 where
-    H: ExclusiveMessageHandler<SessionState = ServerName> + Clone + Send + Sync + 'static
+    H: ExclusiveMessageHandler<SessionState = ServerName> + Clone + Send + Sync + 'static,
 {
     pub async fn new(
         sibling_domains: impl IntoIterator<Item = (String, SocketAddr)>,
         network_port: u16,
         identity: Option<Identity>,
-        handler: H
-    ) -> anyhow::Result<Self>
-    {
-        let sibling_domains = Arc::new(sibling_domains
-            .into_iter()
-            .map(|(domain, addr)|
-                (Arc::from(domain.into_boxed_str()), addr)
-            )
-            .collect::<BiMap<_, _>>());
+        handler: H,
+    ) -> anyhow::Result<Self> {
+        let sibling_domains = Arc::new(
+            sibling_domains
+                .into_iter()
+                .map(|(domain, addr)| (Arc::from(domain.into_boxed_str()), addr))
+                .collect::<BiMap<_, _>>(),
+        );
 
         let sibling_domains2 = sibling_domains.clone();
 
         let tls_acceptor;
         let tls_builder;
-        
+
         if let Some(identity) = identity {
             tls_builder = Some(TlsConnectorWrapper::from(TlsConnector::builder().build()?));
             tls_acceptor = Some(TlsAcceptorWrapper::from(TlsAcceptor::new(identity)?))
@@ -104,13 +100,13 @@ where
             sibling_domains,
             network_port,
             task_handle,
-            handler
+            handler,
         })
     }
 
     pub async fn send_message<T>(&self, domain: &str, message: T) -> Result<(), Error>
     where
-       T: Serialize + Send + Sync 
+        T: Serialize + Send + Sync,
     {
         if !self.sibling_domains.contains_left(domain) {
             return Err(Error::msg(format!("{domain} is not a sibling")));
@@ -119,12 +115,12 @@ where
         let connection = TcpStream::connect((domain, self.network_port)).await?;
 
         match &self.tls_builder {
-            Some(tls_builder) => BinaryMessageStream::from(tls_builder
-                .connect(domain, connection)
-                .await?)
-                .send_message(message)
-                .await
-                .map_err(Into::into),
+            Some(tls_builder) => {
+                BinaryMessageStream::from(tls_builder.connect(domain, connection).await?)
+                    .send_message(message)
+                    .await
+                    .map_err(Into::into)
+            }
             None => BinaryMessageStream::from(connection)
                 .send_message(message)
                 .await
@@ -134,7 +130,7 @@ where
 
     pub async fn broadcast_message<T>(&self, message: T) -> Vec<(String, Error)>
     where
-       T: Serialize + Send + Sync 
+        T: Serialize + Send + Sync,
     {
         let mut results = vec![];
         let domains = self
@@ -144,14 +140,13 @@ where
             .collect::<Vec<_>>();
 
         for domain in domains {
-            let connection =
-                match TcpStream::connect((domain.as_str(), self.network_port)).await {
-                    Ok(x) => x,
-                    Err(e) => {
-                        results.push((domain, e.into()));
-                        continue;
-                    }
-                };
+            let connection = match TcpStream::connect((domain.as_str(), self.network_port)).await {
+                Ok(x) => x,
+                Err(e) => {
+                    results.push((domain, e.into()));
+                    continue;
+                }
+            };
             match &self.tls_builder {
                 Some(tls_builder) => {
                     match tls_builder.connect(&domain, connection).await {
@@ -168,7 +163,10 @@ where
                     };
                 }
                 None => {
-                    if let Err(e) = BinaryMessageStream::from(connection).send_message(&message).await {
+                    if let Err(e) = BinaryMessageStream::from(connection)
+                        .send_message(&message)
+                        .await
+                    {
                         results.push((domain, e.into()));
                     }
                 }

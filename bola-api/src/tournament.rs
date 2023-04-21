@@ -1,9 +1,7 @@
 use log::error;
 use mangle_api_core::rand::{rngs::StdRng, RngCore, SeedableRng};
 use serde::Serialize;
-use std::{
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const GET_TOURNAMENT_ERR_DURATION: Duration = Duration::from_secs(1);
 
@@ -11,7 +9,6 @@ pub struct Tournament {
     start_time: SystemTime,
     start_time_duration: Duration,
 }
-
 
 #[derive(Serialize)]
 pub struct TournamentData {

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::{MessageStream};
+use crate::MessageStream;
 
 pub struct BinaryMessageStream<T: AsyncRead + AsyncWrite + Unpin + Send>(pub(crate) T);
 

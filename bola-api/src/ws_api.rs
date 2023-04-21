@@ -1,6 +1,4 @@
-use std::{
-    time::Instant
-};
+use std::time::Instant;
 
 use axum::{
     async_trait,
@@ -11,21 +9,29 @@ use axum::{
 use log::{error, warn};
 use mangle_api_core::{
     self,
-    auth::{token::{TokenVerificationError, VerifiedToken}, openid::{OIDC, OIDCState}},
+    auth::{
+        openid::{OIDCState, OIDC},
+        token::{TokenVerificationError, VerifiedToken},
+    },
+    neo_api::NeoApiConfig,
     serde_json,
     webrtc::{
         ConnectionReceiver, ICECandidate, JoinSessionError, SDPAnswer, SDPOffer, SDPOfferStream,
     },
-    ws::{ManagedWebSocket, WebSocketCode, WsError}, neo_api::NeoApiConfig,
+    ws::{ManagedWebSocket, WebSocketCode, WsError},
 };
-use messagist::{ExclusiveMessageHandler, MessageStream, AliasableMessageHandler};
+use messagist::{AliasableMessageHandler, ExclusiveMessageHandler, MessageStream};
 use rustrict::CensorStr;
-use serde::{Deserialize};
+use serde::Deserialize;
 use tokio::select;
 
 use crate::{
-    db::{UserProfile, DB}, leaderboard::{LeaderboardEntry, Leaderboard, self}, multiplayer::RoomCode,
-    tournament::TournamentData, LoginTokenConfig, LoginTokenData, LoginTokenGranter, state::GlobalState,
+    db::{UserProfile, DB},
+    leaderboard::{self, Leaderboard, LeaderboardEntry},
+    multiplayer::RoomCode,
+    state::GlobalState,
+    tournament::TournamentData,
+    LoginTokenConfig, LoginTokenData, LoginTokenGranter,
 };
 
 // async fn handle_webrtc(
@@ -91,7 +97,7 @@ where
                     let api = AsRef::<NeoApiConfig<WsApiHandler>>::as_ref(state).get_handler();
 
                     if api.connections.contains(&x.identifier.email) {
-                        return Err((StatusCode::CONFLICT, "Already Connected").into_response())
+                        return Err((StatusCode::CONFLICT, "Already Connected").into_response());
                     }
                     api.connections.insert(x.identifier.email.clone());
                     Some(x)
@@ -102,7 +108,7 @@ where
 
         Ok(Self {
             login_token,
-            last_leaderboard_retrieval: None
+            last_leaderboard_retrieval: None,
         })
     }
 }
@@ -146,7 +152,7 @@ pub struct WsApiHandler {
     leaderboard: &'static Leaderboard,
     db: &'static DB,
     oidc: &'static OIDC<&'static OIDCState>,
-    login_tokens: &'static LoginTokenGranter
+    login_tokens: &'static LoginTokenGranter,
 }
 
 #[async_trait]
@@ -446,13 +452,9 @@ impl AliasableMessageHandler for WsApiHandler {
     //     }
     // }
 
-    async fn handle<S: MessageStream>(
-        &self,
-        mut stream: S,
-        mut session_state: Self::SessionState,
-    ) {
+    async fn handle<S: MessageStream>(&self, mut stream: S, mut session_state: Self::SessionState) {
         macro_rules! send {
-            ($msg: expr) => {
+            ($msg:expr) => {
                 if let Err(_) = stream.send_message($msg).await {
                     return;
                 }
@@ -468,7 +470,7 @@ impl AliasableMessageHandler for WsApiHandler {
                     WSAPIMessage::ScoreUpdateRequest { difficulty, score } => {
                         let email = &login_token.identifier.email;
                         let username = &login_token.identifier.username;
-        
+
                         let res = match difficulty.as_str() {
                             "easy" => {
                                 leaderboard
@@ -505,59 +507,64 @@ impl AliasableMessageHandler for WsApiHandler {
                             }
                             _ => {
                                 send!("Not a valid difficulty");
-                                return 
+                                return;
                             }
                         };
-        
+
                         if let Err(_e) = res {
                             send!("Internal Error");
                         }
-        
+
                         send!("Success");
                     }
                     WSAPIMessage::Login => {
                         send!("Already logged in");
                     }
-                    _ => todo!()
+                    _ => todo!(),
                 }
             } else {
                 match msg {
-                    WSAPIMessage::GetLeaderboard => { }
-                    WSAPIMessage::GetTournament => { }
-                    WSAPIMessage::Login => match self.login(&mut session_state, &mut stream).await {
-                        Ok(StreamStatus::Closed) => break,
-                        Ok(_) => { }
-                        Err(_) => break
+                    WSAPIMessage::GetLeaderboard => {}
+                    WSAPIMessage::GetTournament => {}
+                    WSAPIMessage::Login => {
+                        match self.login(&mut session_state, &mut stream).await {
+                            Ok(StreamStatus::Closed) => break,
+                            Ok(_) => {}
+                            Err(_) => break,
+                        }
                     }
 
-                    _ => send!("Must be logged in")
+                    _ => send!("Must be logged in"),
                 }
             }
         }
     }
 }
 
-
 enum StreamStatus {
     Ok,
-    Closed
+    Closed,
 }
 
-
-impl WsApiHandler{
-    pub(crate) fn new(leaderboard: &'static Leaderboard, db: &'static  DB, oidc: &'static OIDC<&'static OIDCState>, login_tokens: &'static LoginTokenGranter) -> Self {
+impl WsApiHandler {
+    pub(crate) fn new(
+        leaderboard: &'static Leaderboard,
+        db: &'static DB,
+        oidc: &'static OIDC<&'static OIDCState>,
+        login_tokens: &'static LoginTokenGranter,
+    ) -> Self {
         Self {
             connections: Default::default(),
             leaderboard,
             db,
             oidc,
-            login_tokens
+            login_tokens,
         }
     }
     async fn login<S: MessageStream>(
         &self,
         session_state: &mut SessionState,
-        stream: &mut S
+        stream: &mut S,
     ) -> Result<StreamStatus, S::Error> {
         let db = &self.db;
         let oidc = &self.oidc;
@@ -565,7 +572,7 @@ impl WsApiHandler{
         let login_tokens = &self.login_tokens;
 
         macro_rules! send {
-            ($msg: expr) => {
+            ($msg:expr) => {
                 stream.send_message($msg).await?
             };
         }
@@ -575,9 +582,9 @@ impl WsApiHandler{
             };
         }
         macro_rules! close {
-            ($msg: expr) => {{
+            ($msg:expr) => {{
                 send!($msg);
-                return Ok(StreamStatus::Closed)
+                return Ok(StreamStatus::Closed);
             }};
         }
 
@@ -714,7 +721,7 @@ impl WsApiHandler{
                 close!("Internal Error");
             }
         };
-        
+
         Ok(StreamStatus::Ok)
     }
 }

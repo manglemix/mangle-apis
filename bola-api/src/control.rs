@@ -2,7 +2,7 @@ use std::{future::Future, pin::Pin, task::Poll};
 
 use axum::async_trait;
 use log::error;
-use messagist::{ExclusiveMessageHandler, MessageStream, pipes::ListenerErrorHandler};
+use messagist::{pipes::ListenerErrorHandler, ExclusiveMessageHandler, MessageStream};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -48,12 +48,16 @@ pub fn new_control_handler() -> (ControlHandler, ControlHandlerReceiver) {
 impl ExclusiveMessageHandler for ControlHandler {
     type SessionState = ();
 
-    async fn handle<S: MessageStream + Send>(&mut self, mut stream: S, _session_state: Self::SessionState) {
+    async fn handle<S: MessageStream + Send>(
+        &mut self,
+        mut stream: S,
+        _session_state: Self::SessionState,
+    ) {
         let msg: ControlClientMessage = match stream.recv_message().await {
             Ok(x) => x,
             Err(e) => {
                 error!("Error receiving message: {e}");
-                return
+                return;
             }
         };
         match msg {
@@ -63,7 +67,6 @@ impl ExclusiveMessageHandler for ControlHandler {
         }
     }
 }
-
 
 #[async_trait]
 impl ListenerErrorHandler for ControlHandler {

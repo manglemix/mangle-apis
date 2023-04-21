@@ -1,4 +1,4 @@
-use std::{time::Duration};
+use std::time::Duration;
 
 use axum::{
     extract::{FromRequest, State, WebSocketUpgrade},

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, future::Future, sync::Arc, time::Duration, ops::Deref};
+use std::{collections::HashMap, future::Future, ops::Deref, sync::Arc, time::Duration};
 
 use axum::{
     body::HttpBody,
@@ -28,13 +28,12 @@ async fn new_oidc_client(
 }
 
 #[derive(Clone)]
-pub struct OIDC<S: Deref<Target=OIDCState> + Clone> {
+pub struct OIDC<S: Deref<Target = OIDCState> + Clone> {
     oidc_state: S,
     client: Arc<DiscoveredClient>,
 }
 
-
-impl<S: Deref<Target=OIDCState> + Clone> OIDC<S> {
+impl<S: Deref<Target = OIDCState> + Clone> OIDC<S> {
     async fn new(
         client_id: String,
         client_secret: String,
@@ -82,7 +81,12 @@ impl<S: Deref<Target=OIDCState> + Clone> OIDC<S> {
 
         let (ready_sender, receiver) = channel();
 
-        let untracker = track_session(self.oidc_state.clone(), csrf_token, self.client.clone(), ready_sender);
+        let untracker = track_session(
+            self.oidc_state.clone(),
+            csrf_token,
+            self.client.clone(),
+            ready_sender,
+        );
 
         let fut = async move {
             let _untracker = untracker;
@@ -111,19 +115,18 @@ pub struct OIDCState {
     pending_auths: Mutex<HashMap<String, PendingSession>>,
 }
 
-struct Untracker<S: Deref<Target=OIDCState>> {
+struct Untracker<S: Deref<Target = OIDCState>> {
     oauth_state: S,
     csrf_token: String,
 }
 
-impl<S: Deref<Target=OIDCState>> Drop for Untracker<S> {
+impl<S: Deref<Target = OIDCState>> Drop for Untracker<S> {
     fn drop(&mut self) {
         self.oauth_state.untrack_session(&self.csrf_token);
     }
 }
 
-
-fn track_session<S: Deref<Target=OIDCState>>(
+fn track_session<S: Deref<Target = OIDCState>>(
     oauth_state: S,
     csrf_token: String,
     client: Arc<DiscoveredClient>,
@@ -142,7 +145,6 @@ fn track_session<S: Deref<Target=OIDCState>>(
         csrf_token,
     }
 }
-
 
 impl OIDCState {
     fn untrack_session(&self, csrf_token: &str) {
@@ -205,12 +207,14 @@ pub struct AuthRedirectParams {
 pub async fn oidc_redirect_handler<S>(
     Query(AuthRedirectParams { state, code }): Query<AuthRedirectParams>,
     State(global_state): State<S>,
-    State(pages): State<AuthPages>
+    State(pages): State<AuthPages>,
 ) -> Html<String>
 where
-    S: AsRef<OIDCState>
+    S: AsRef<OIDCState>,
 {
-    AsRef::<OIDCState>::as_ref(&global_state).verify_auth(code, state, pages).await
+    AsRef::<OIDCState>::as_ref(&global_state)
+        .verify_auth(code, state, pages)
+        .await
 }
 
 pub fn openid_redirect<S, B>() -> MethodRouter<S, B>
@@ -237,9 +241,9 @@ pub mod google {
 
     use super::*;
     #[derive(Clone)]
-    pub struct GoogleOIDC<S: Deref<Target=OIDCState> + Clone>(pub OIDC<S>);
+    pub struct GoogleOIDC<S: Deref<Target = OIDCState> + Clone>(pub OIDC<S>);
 
-    pub async fn new_google_oidc_from_file<S: Deref<Target=OIDCState> + Clone>(
+    pub async fn new_google_oidc_from_file<S: Deref<Target = OIDCState> + Clone>(
         filename: impl AsRef<Path>,
         oidc_state: S,
         redirect_url: &str,

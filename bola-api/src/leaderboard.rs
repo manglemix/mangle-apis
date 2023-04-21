@@ -4,14 +4,15 @@ use anyhow::{anyhow, Context};
 use aws_sdk_dynamodb::model::{AttributeAction, AttributeValue, AttributeValueUpdate};
 use derive_more::{Display, Error};
 use log::error;
-use mangle_api_core::{parking_lot::RwLock, distributed::Node};
+use mangle_api_core::{distributed::Node, parking_lot::RwLock};
 use serde::Serialize;
 use tokio::{
-    sync::broadcast::{Sender, channel}, spawn,
+    spawn,
+    sync::broadcast::{channel, Sender},
 };
 
 use crate::{
-    db::{DB},
+    db::DB,
     network::{HighscoreUpdate, NetworkMessage, SiblingNetworkHandler},
 };
 

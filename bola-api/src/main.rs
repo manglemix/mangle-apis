@@ -18,21 +18,19 @@ use log::info;
 use mangle_api_core::{
     auth::{
         auth_pages::{AuthPages, AuthPagesSrc},
-        openid::{
-            google::{new_google_oidc_from_file},
-            openid_redirect, OIDCState,
-        },
-        token::{HeaderTokenConfig, TokenGranter, TokenConfig},
+        openid::{google::new_google_oidc_from_file, openid_redirect, OIDCState},
+        token::{HeaderTokenConfig, TokenConfig, TokenGranter},
     },
     distributed::Node,
     get_https_credentials,
     get_pipe_name,
     make_app,
+    neo_api::{ws_api_route, NeoApiConfig},
     new_api,
     // neo_api::{ws_api_route},
     pre_matches,
     setup_logger,
-    CommandMatchResult, neo_api::{ws_api_route, NeoApiConfig},
+    CommandMatchResult,
 };
 use messagist::{pipes::start_connection, MessageStream};
 use multiplayer::Multiplayer;
@@ -45,13 +43,13 @@ mod db;
 mod leaderboard;
 mod multiplayer;
 mod network;
+mod state;
 mod tournament;
 mod ws_api;
-mod state;
 
 use config::Config;
 use tournament::Tournament;
-use ws_api::{WsApiHandler, SessionState};
+use ws_api::{SessionState, WsApiHandler};
 
 use crate::control::ControlClientMessage;
 
@@ -75,7 +73,6 @@ impl HeaderTokenConfig for LoginTokenConfig {
 }
 
 type LoginTokenGranter = TokenGranter<LoginTokenConfig>;
-
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -137,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-    
+
     let css = read_to_string(&config.stylesheet_path)
         .context(format!("Reading {}", config.stylesheet_path))?;
 

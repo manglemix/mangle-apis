@@ -40,18 +40,14 @@ impl SiblingNetworkHandler {
 impl ExclusiveMessageHandler for SiblingNetworkHandler {
     type SessionState = ServerName;
 
-    async fn handle<S: MessageStream>(
-        &mut self,
-        mut stream: S,
-        server_name: Self::SessionState,
-    ) {
+    async fn handle<S: MessageStream>(&mut self, mut stream: S, server_name: Self::SessionState) {
         let server_name = server_name.0;
         match stream.recv_message().await {
             Ok(NetworkMessage::HighscoreUpdate(msg)) => {
                 let _ = self.highscore_updater.send(msg);
             }
-            Err(e) => error!("Error receiving node message: {e} from {server_name}")
-        } 
+            Err(e) => error!("Error receiving node message: {e} from {server_name}"),
+        }
     }
 }
 

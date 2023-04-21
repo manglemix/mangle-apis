@@ -203,7 +203,6 @@ pub enum JoinSessionError {
 
 pub struct ExistingSessionError;
 
-
 impl<K> WebRTCSessionManager<K>
 where
     K: Hash + Eq + Clone,
@@ -234,10 +233,7 @@ where
 
     pub fn join_session(&self, id: &K) -> Result<SDPOfferStreamSender<K>, JoinSessionError> {
         {
-            let session = self
-                .sessions
-                .get(id)
-                .ok_or(JoinSessionError::NotFound)?;
+            let session = self.sessions.get(id).ok_or(JoinSessionError::NotFound)?;
             if session.peers.len() >= session.max_size {
                 return Err(JoinSessionError::Full);
             }

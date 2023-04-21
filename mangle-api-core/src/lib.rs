@@ -20,13 +20,13 @@ use anyhow::{Context, Error, Result};
 use clap::{arg, builder::IntoResettable, ArgMatches, Command};
 use lers::{solver::Http01Solver, Directory, LETS_ENCRYPT_PRODUCTION_URL};
 use messagist::{
-    pipes::{
-        start_connection, start_listener, ListenerErrorHandler,
-        ToLocalSocketName,
-    },
+    pipes::{start_connection, start_listener, ListenerErrorHandler, ToLocalSocketName},
     ExclusiveMessageHandler,
 };
-use std::{future::{pending, Future}, fmt::Display};
+use std::{
+    fmt::Display,
+    future::{pending, Future},
+};
 
 use fern::{log_file, Dispatch};
 use log::{error, info, warn, LevelFilter};
@@ -360,8 +360,7 @@ pub struct API<
     concurrent_fut: Fut,
 }
 
-pub fn new_api(
-) -> API<Unset, Unset, Unset, Unset, 0, 0, Unset, Pending<()>> {
+pub fn new_api() -> API<Unset, Unset, Unset, Unset, 0, 0, Unset, Pending<()>> {
     API {
         state: Unset,
         pipe_name: Unset,
@@ -377,9 +376,7 @@ pub fn new_api(
     }
 }
 
-impl<S, P, AT, BO, const N1: usize, const N2: usize, H, Fut>
-    API<S, P, AT, BO, N1, N2, H, Fut>
-{
+impl<S, P, AT, BO, const N1: usize, const N2: usize, H, Fut> API<S, P, AT, BO, N1, N2, H, Fut> {
     /// Sets the state used by this API
     /// # Warning
     /// Setting the state removes all existing routes
@@ -524,10 +521,7 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, Fut>
             concurrent_fut: self.concurrent_fut,
         }
     }
-    pub fn set_https_identity(
-        self,
-        https_identity: Identity,
-    ) -> API<S, P, AT, BO, N1, N2, H, Fut> {
+    pub fn set_https_identity(self, https_identity: Identity) -> API<S, P, AT, BO, N1, N2, H, Fut> {
         API {
             state: self.state,
             pipe_name: self.pipe_name,
@@ -542,15 +536,9 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, Fut>
             concurrent_fut: self.concurrent_fut,
         }
     }
-    pub fn set_control_handler<H2>(
-        self,
-        control_handler: H2,
-    ) -> API<S, P, AT, BO, N1, N2, H2, Fut>
+    pub fn set_control_handler<H2>(self, control_handler: H2) -> API<S, P, AT, BO, N1, N2, H2, Fut>
     where
-        H2: ExclusiveMessageHandler<SessionState = ()>
-            + Send
-            + ListenerErrorHandler
-            + 'static,
+        H2: ExclusiveMessageHandler<SessionState = ()> + Send + ListenerErrorHandler + 'static,
     {
         API {
             state: self.state,
@@ -598,11 +586,8 @@ where
 {
     pub async fn run(self) -> Result<()> {
         // Setup Control Server
-        let control_listener = start_listener(
-            self.pipe_name,
-            self.control_handler,
-        )
-        .context("Setting up control listener")?;
+        let control_listener = start_listener(self.pipe_name, self.control_handler)
+            .context("Setting up control listener")?;
 
         // Setup Router
         let mut router = Router::new();

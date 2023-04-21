@@ -2,17 +2,14 @@ use std::{hash::Hash, sync::Arc, time::Duration};
 
 use axum::{
     async_trait,
-    extract::{FromRequestParts},
+    extract::FromRequestParts,
     http::{request::Parts, HeaderValue, StatusCode},
     response::IntoResponse,
 };
 use bimap::BiMap;
 use parking_lot::Mutex;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
-use tokio::{
-    spawn,
-    time::sleep, task::JoinHandle,
-};
+use tokio::{spawn, task::JoinHandle, time::sleep};
 
 struct TokenEntry<ID> {
     _expiry_handle: JoinHandle<()>,
@@ -33,13 +30,11 @@ impl<ID: PartialEq> PartialEq for TokenEntry<ID> {
 
 impl<ID: Eq> Eq for TokenEntry<ID> {}
 
-
 impl<ID> Drop for TokenEntry<ID> {
     fn drop(&mut self) {
         self._expiry_handle.abort();
     }
 }
-
 
 pub struct TokenGranter<C: TokenConfig> {
     // When the sender gets dropped, the task responsible for expiring the token will complete
@@ -56,12 +51,11 @@ pub trait HeaderTokenConfig: TokenConfig {
     const HEADER_NAME: &'static str;
 }
 
-
 impl<C: TokenConfig> TokenGranter<C> {
     pub fn new(token_duration: Duration) -> Self {
         Self {
             tokens: Default::default(),
-            token_duration
+            token_duration,
         }
     }
 
@@ -77,19 +71,22 @@ impl<C: TokenConfig> TokenGranter<C> {
         let token2 = token.clone();
 
         let tokens = self.tokens.clone();
-        let token_duration  = self.token_duration;
+        let token_duration = self.token_duration;
 
         let entry = TokenEntry {
             _expiry_handle: spawn(async move {
                 sleep(token_duration).await;
                 tokens.lock().remove_by_left(&token2);
             }),
-            identifier: id.clone()
+            identifier: id.clone(),
         };
 
         self.tokens.lock().insert(token.clone(), entry);
 
-        VerifiedToken { token, identifier: id }
+        VerifiedToken {
+            token,
+            identifier: id,
+        }
     }
 
     pub fn revoke_token(&self, token: &HeaderValue) {
@@ -135,7 +132,7 @@ impl IntoResponse for TokenVerificationError {
 impl<S, C> FromRequestParts<S> for VerifiedToken<C>
 where
     C: HeaderTokenConfig,
-    S: AsRef<TokenGranter<C>> + Sync
+    S: AsRef<TokenGranter<C>> + Sync,
 {
     type Rejection = TokenVerificationError;
 
@@ -145,7 +142,8 @@ where
                 return Err(TokenVerificationError::InvalidTokenLength);
             }
 
-            return state.as_ref()
+            return state
+                .as_ref()
                 .verify_token(token)
                 .ok_or(TokenVerificationError::InvalidToken);
         }
@@ -153,7 +151,8 @@ where
         if let Some(query) = parts.uri.query() {
             if let Some(idx) = query.find(&C::HEADER_NAME.to_lowercase()) {
                 return if let Some(token) = query.get((idx + 12)..(idx + 12 + C::TOKEN_LENGTH)) {
-                    state.as_ref()
+                    state
+                        .as_ref()
                         .verify_token(&HeaderValue::from_str(token).unwrap())
                         .ok_or(TokenVerificationError::InvalidToken)
                 } else {

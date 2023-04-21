@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, task::Poll, io::Error};
+use std::{future::Future, io::Error, pin::Pin, task::Poll};
 
 use crate::{bin::BinaryMessageStream, ExclusiveMessageHandler};
 use async_trait::async_trait;
@@ -6,7 +6,6 @@ use interprocess::local_socket::tokio::{LocalSocketListener, LocalSocketStream};
 pub use interprocess::local_socket::ToLocalSocketName;
 use tokio::{spawn, task::JoinHandle};
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
-
 
 pub type LocalStream = Compat<LocalSocketStream>;
 
@@ -64,7 +63,7 @@ pub fn start_listener<'a, H>(
     mut handler: H,
 ) -> Result<ListenerHandle, Error>
 where
-    H: ExclusiveMessageHandler<SessionState = ()> + Send + ListenerErrorHandler + 'static
+    H: ExclusiveMessageHandler<SessionState = ()> + Send + ListenerErrorHandler + 'static,
 {
     let listener = LocalSocketListener::bind(addr)?;
 
@@ -74,9 +73,7 @@ where
                 let stream = match listener.accept().await {
                     Ok(x) => x,
                     Err(e) => {
-                        handler
-                            .handle_error(e)
-                            .await;
+                        handler.handle_error(e).await;
                         continue;
                     }
                 };
