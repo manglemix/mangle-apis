@@ -6,7 +6,7 @@ use axum::{
     http::{Request, StatusCode},
     response::{IntoResponse, Response},
 };
-use log::{error, warn};
+use log::{error};
 use mangle_api_core::{
     self,
     auth::{
@@ -14,23 +14,16 @@ use mangle_api_core::{
         token::{TokenVerificationError, VerifiedToken},
     },
     neo_api::NeoApiConfig,
-    serde_json,
-    webrtc::{
-        ConnectionReceiver, ICECandidate, JoinSessionError, SDPAnswer, SDPOffer, SDPOfferStream,
-    },
-    ws::{ManagedWebSocket, WebSocketCode, WsError},
 };
-use messagist::{AliasableMessageHandler, ExclusiveMessageHandler, MessageStream};
+use messagist::{AliasableMessageHandler, MessageStream};
 use rustrict::CensorStr;
 use serde::Deserialize;
 use tokio::select;
 
 use crate::{
     db::{UserProfile, DB},
-    leaderboard::{self, Leaderboard, LeaderboardEntry},
-    multiplayer::RoomCode,
+    leaderboard::{Leaderboard, LeaderboardEntry},
     state::GlobalState,
-    tournament::TournamentData,
     LoginTokenConfig, LoginTokenData, LoginTokenGranter,
 };
 
