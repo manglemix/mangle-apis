@@ -3,7 +3,6 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use std::{
     hash::Hash,
     ops::{Deref, DerefMut},
-    sync::Arc,
 };
 use tokio::{
     select,
@@ -91,7 +90,7 @@ impl<'a, K: Hash + Eq + Clone> DerefMut for HostConnectionReceiver<'a, K> {
 
 impl<'a, K: Hash + Eq + Clone> Drop for HostConnectionReceiver<'a, K> {
     fn drop(&mut self) {
-        self.manager.inner.sessions.remove(&self.id);
+        self.manager.sessions.remove(&self.id);
     }
 }
 
@@ -190,7 +189,7 @@ pub trait RandomID: Sized {
     fn generate() -> Self;
 }
 
-struct WebRTCSessionManagerInner<K>
+pub struct WebRTCSessionManager<K>
 where
     K: Hash + Eq + Clone,
 {
@@ -204,13 +203,6 @@ pub enum JoinSessionError {
 
 pub struct ExistingSessionError;
 
-#[derive(Clone)]
-pub struct WebRTCSessionManager<K>
-where
-    K: Hash + Eq + Clone,
-{
-    inner: Arc<WebRTCSessionManagerInner<K>>,
-}
 
 impl<K> WebRTCSessionManager<K>
 where
@@ -221,7 +213,7 @@ where
         id: K,
         max_size: usize,
     ) -> Result<HostConnectionReceiver<K>, ExistingSessionError> {
-        let Entry::Vacant(slot) = self.inner.sessions.entry(id.clone()) else { return Err(ExistingSessionError)};
+        let Entry::Vacant(slot) = self.sessions.entry(id.clone()) else { return Err(ExistingSessionError)};
         let (sender, conn_stream_recv) = mpsc::channel(max_size);
         let (alive_sender, alive_recv) = broadcast::channel(0);
 
@@ -243,7 +235,6 @@ where
     pub fn join_session(&self, id: &K) -> Result<SDPOfferStreamSender<K>, JoinSessionError> {
         {
             let session = self
-                .inner
                 .sessions
                 .get(id)
                 .ok_or(JoinSessionError::NotFound)?;
@@ -251,7 +242,7 @@ where
                 return Err(JoinSessionError::Full);
             }
         }
-        let ref_mut = self.inner.sessions.get_mut(id).unwrap();
+        let ref_mut = self.sessions.get_mut(id).unwrap();
         Ok(SDPOfferStreamSender {
             member_count: ref_mut.peers.len(),
             max_size: ref_mut.max_size,
@@ -279,9 +270,7 @@ where
 {
     fn default() -> Self {
         Self {
-            inner: Arc::new(WebRTCSessionManagerInner {
-                sessions: DashMap::default(),
-            }),
+            sessions: DashMap::default(),
         }
     }
 }

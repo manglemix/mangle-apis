@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, task::Poll};
 
 use axum::async_trait;
 use log::error;
@@ -18,13 +18,17 @@ pub struct ControlHandlerReceiver {
 }
 
 impl Future for ControlHandlerReceiver {
-    type Output = ();
+    type Output = String;
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        Pin::new(&mut self.stop_recv).poll_recv(cx).map(|_| ())
+    ) -> Poll<Self::Output> {
+        if Pin::new(&mut self.stop_recv).poll_recv(cx).is_ready() {
+            Poll::Ready("Stop command issued".into())
+        } else {
+            Poll::Pending
+        }
     }
 }
 

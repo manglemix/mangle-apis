@@ -1,5 +1,8 @@
+use axum::async_trait;
 use derive_more::From;
-use mangle_api_core::distributed::{MessageRouter, NetworkMessageSet};
+use log::error;
+use mangle_api_core::distributed::ServerName;
+use messagist::{ExclusiveMessageHandler, MessageStream};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{channel, Receiver, Sender};
 
@@ -20,25 +23,39 @@ impl HighScoreUpdateSubscription {
     }
 }
 
-pub struct NetworkMessageRouter {
+#[derive(Clone)]
+pub struct SiblingNetworkHandler {
     highscore_updater: Sender<HighscoreUpdate>,
 }
 
-impl MessageRouter<NetworkMessage> for NetworkMessageRouter {
-    fn new() -> Self {
+impl SiblingNetworkHandler {
+    pub fn new() -> Self {
         Self {
             highscore_updater: channel(MESSAGE_ROUTER_BUFFER_SIZE).0,
         }
     }
+}
 
-    fn route_message(&self, _domain: &std::sync::Arc<str>, message: NetworkMessage) -> bool {
-        match message {
-            NetworkMessage::HighscoreUpdate(msg) => self.highscore_updater.send(msg).is_ok(),
-        }
+#[async_trait]
+impl ExclusiveMessageHandler for SiblingNetworkHandler {
+    type SessionState = ServerName;
+
+    async fn handle<S: MessageStream>(
+        &mut self,
+        mut stream: S,
+        server_name: Self::SessionState,
+    ) {
+        let server_name = server_name.0;
+        match stream.recv_message().await {
+            Ok(NetworkMessage::HighscoreUpdate(msg)) => {
+                let _ = self.highscore_updater.send(msg);
+            }
+            Err(e) => error!("Error receiving node message: {e} from {server_name}")
+        } 
     }
 }
 
-impl NetworkMessageRouter {
+impl SiblingNetworkHandler {
     pub fn subscribe_to_highscore_update(&self) -> HighScoreUpdateSubscription {
         HighScoreUpdateSubscription(self.highscore_updater.subscribe())
     }
@@ -47,8 +64,4 @@ impl NetworkMessageRouter {
 #[derive(Clone, Deserialize, Serialize, From)]
 pub enum NetworkMessage {
     HighscoreUpdate(HighscoreUpdate),
-}
-
-impl NetworkMessageSet for NetworkMessage {
-    type MessageRouter = NetworkMessageRouter;
 }

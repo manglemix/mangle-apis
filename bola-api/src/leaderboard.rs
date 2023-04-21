@@ -4,16 +4,15 @@ use anyhow::{anyhow, Context};
 use aws_sdk_dynamodb::model::{AttributeAction, AttributeValue, AttributeValueUpdate};
 use derive_more::{Display, Error};
 use log::error;
-use mangle_api_core::{distributed::Node, parking_lot::RwLock};
+use mangle_api_core::{parking_lot::RwLock, distributed::Node};
 use serde::Serialize;
 use tokio::{
-    spawn,
-    sync::broadcast::{channel, Sender},
+    sync::broadcast::{Sender, channel}, spawn,
 };
 
 use crate::{
-    db::DB,
-    network::{HighscoreUpdate, NetworkMessage},
+    db::{DB},
+    network::{HighscoreUpdate, NetworkMessage, SiblingNetworkHandler},
 };
 
 const LEADERBOARD_UPDATE_BUFFER_SIZE: usize = 8;
@@ -34,7 +33,7 @@ pub struct LeaderboardEntry {
     pub username: String,
 }
 
-struct LeaderboardImpl {
+pub struct Leaderboard {
     easy_leaderboard: RwLock<Vec<LeaderboardEntry>>,
     normal_leaderboard: RwLock<Vec<LeaderboardEntry>>,
     expert_leaderboard: RwLock<Vec<LeaderboardEntry>>,
@@ -45,8 +44,8 @@ struct LeaderboardImpl {
 
     leaderboard_updater: Sender<Arc<LeaderboardUpdate>>,
 
-    db: DB,
-    node: Node<NetworkMessage>,
+    db: &'static DB,
+    node: &'static Node<SiblingNetworkHandler>,
 }
 
 #[derive(Error, Display, Debug)]
@@ -59,11 +58,6 @@ pub struct LeaderboardView {
     easy: Vec<LeaderboardEntry>,
     normal: Vec<LeaderboardEntry>,
     expert: Vec<LeaderboardEntry>,
-}
-
-#[derive(Clone)]
-pub struct Leaderboard {
-    inner: Arc<LeaderboardImpl>,
 }
 
 impl Leaderboard {
@@ -119,11 +113,11 @@ impl Leaderboard {
     }
 
     pub async fn new(
-        db: DB,
-        node: Node<NetworkMessage>,
+        db: &'static DB,
+        node: &'static Node<SiblingNetworkHandler>,
         leaderboard_span: usize,
-    ) -> Result<Self, anyhow::Error> {
-        let inner = Arc::new(LeaderboardImpl {
+    ) -> Result<&'static Self, anyhow::Error> {
+        let leaderboard = Self {
             easy_leaderboard: RwLock::new(
                 Self::pull_leaderboard(&db, "easy_highscore", leaderboard_span).await?,
             ),
@@ -137,11 +131,9 @@ impl Leaderboard {
             leaderboard_span,
             leaderboard_updater: channel(LEADERBOARD_UPDATE_BUFFER_SIZE).0,
             db,
-            node: node.clone(),
-        });
-        let this = Self { inner };
-        let this2 = this.clone();
-        let mut subscription = node.get_message_router().subscribe_to_highscore_update();
+            node,
+        };
+        let mut subscription = node.get_handler().subscribe_to_highscore_update();
 
         spawn(async move {
             loop {
@@ -150,24 +142,24 @@ impl Leaderboard {
                 };
 
                 match msg.difficulty.as_str() {
-                    "easy" => this.local_update_leaderboard(
-                        &this.inner.easy_leaderboard,
+                    "easy" => leaderboard.local_update_leaderboard(
+                        &leaderboard.easy_leaderboard,
                         LeaderboardEntry {
                             score: msg.score,
                             username: msg.username,
                         },
                         LeaderboardUpdate::Easy,
                     ),
-                    "normal" => this.local_update_leaderboard(
-                        &this.inner.normal_leaderboard,
+                    "normal" => leaderboard.local_update_leaderboard(
+                        &leaderboard.normal_leaderboard,
                         LeaderboardEntry {
                             score: msg.score,
                             username: msg.username,
                         },
                         LeaderboardUpdate::Normal,
                     ),
-                    "expert" => this.local_update_leaderboard(
-                        &this.inner.expert_leaderboard,
+                    "expert" => leaderboard.local_update_leaderboard(
+                        &leaderboard.expert_leaderboard,
                         LeaderboardEntry {
                             score: msg.score,
                             username: msg.username,
@@ -182,7 +174,7 @@ impl Leaderboard {
             }
         });
 
-        Ok(this2)
+        todo!()
     }
 
     fn local_update_leaderboard(
@@ -195,11 +187,10 @@ impl Leaderboard {
 
         macro_rules! update {
             () => {{
-                *self.inner.last_update.write() = Instant::now();
+                *self.last_update.write() = Instant::now();
                 leaderboard_writer.sort_by(|a, b| b.cmp(a));
 
                 let _ = self
-                    .inner
                     .leaderboard_updater
                     .send(Arc::new((update_fn)(leaderboard_writer.clone())));
 
@@ -228,7 +219,7 @@ impl Leaderboard {
         }
         let Some(entry) = entry else { update!() };
 
-        if leaderboard_writer.len() >= self.inner.leaderboard_span {
+        if leaderboard_writer.len() >= self.leaderboard_span {
             let last = leaderboard_writer.last_mut().unwrap();
             if *last >= entry {
                 return false;
@@ -255,11 +246,10 @@ impl Leaderboard {
         ));
 
         if let Err(e) = self
-            .inner
             .db
             .client
             .update_item()
-            .table_name(self.inner.db.bola_profiles_table.clone())
+            .table_name(self.db.bola_profiles_table.clone())
             .key("email", AttributeValue::S(email.clone()))
             .attribute_updates(
                 format!("{leaderboard_difficulty}_highscore"),
@@ -280,7 +270,6 @@ impl Leaderboard {
         };
 
         for (domain, err) in self
-            .inner
             .node
             .broadcast_message(&NetworkMessage::HighscoreUpdate(HighscoreUpdate {
                 username: entry.username,
@@ -300,7 +289,7 @@ impl Leaderboard {
         entry: LeaderboardEntry,
     ) -> Result<(), AddLeaderboardEntryError> {
         self.add_leaderboard_entry(
-            &self.inner.easy_leaderboard,
+            &self.easy_leaderboard,
             email,
             entry,
             "easy",
@@ -314,7 +303,7 @@ impl Leaderboard {
         entry: LeaderboardEntry,
     ) -> Result<(), AddLeaderboardEntryError> {
         self.add_leaderboard_entry(
-            &self.inner.normal_leaderboard,
+            &self.normal_leaderboard,
             email,
             entry,
             "normal",
@@ -328,7 +317,7 @@ impl Leaderboard {
         entry: LeaderboardEntry,
     ) -> Result<(), AddLeaderboardEntryError> {
         self.add_leaderboard_entry(
-            &self.inner.expert_leaderboard,
+            &self.expert_leaderboard,
             email,
             entry,
             "expert",
@@ -338,19 +327,19 @@ impl Leaderboard {
     }
     pub fn get_leaderboard(&self) -> LeaderboardView {
         LeaderboardView {
-            easy: self.inner.easy_leaderboard.read().clone(),
-            normal: self.inner.normal_leaderboard.read().clone(),
-            expert: self.inner.expert_leaderboard.read().clone(),
+            easy: self.easy_leaderboard.read().clone(),
+            normal: self.normal_leaderboard.read().clone(),
+            expert: self.expert_leaderboard.read().clone(),
         }
     }
     pub fn get_leaderboard_since(&self, since: Instant) -> Option<LeaderboardView> {
-        if &since < self.inner.last_update.read().deref() {
+        if &since < self.last_update.read().deref() {
             Some(self.get_leaderboard())
         } else {
             None
         }
     }
     pub async fn wait_for_update(&self) -> Option<Arc<LeaderboardUpdate>> {
-        self.inner.leaderboard_updater.subscribe().recv().await.ok()
+        self.leaderboard_updater.subscribe().recv().await.ok()
     }
 }

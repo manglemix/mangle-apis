@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap};
 
 use anyhow::{anyhow, Error};
 use aws_sdk_dynamodb::{
@@ -22,11 +22,12 @@ pub struct UserProfile {
     pub tournament_wins: Vec<u16>,
 }
 
-#[derive(Clone)]
+
 pub struct DB {
     pub client: Client,
     pub bola_profiles_table: String,
 }
+
 
 impl DB {
     pub fn new(config: &SdkConfig, bola_profiles_table: String) -> Self {
@@ -37,7 +38,8 @@ impl DB {
     }
 
     pub async fn is_username_taken(&self, username: impl Into<String>) -> Result<bool, Error> {
-        self.client
+        self
+            .client
             .query()
             .table_name(self.bola_profiles_table.clone())
             .index_name("username-index")

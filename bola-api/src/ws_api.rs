@@ -1,32 +1,31 @@
 use std::{
-    sync::Arc,
-    time::Instant,
+    time::Instant
 };
 
 use axum::{
     async_trait,
-    extract::{FromRef, FromRequest, FromRequestParts},
+    extract::{FromRequest, FromRequestParts},
     http::{Request, StatusCode},
     response::{IntoResponse, Response},
 };
 use log::{error, warn};
 use mangle_api_core::{
     self,
-    auth::{token::{TokenVerificationError, VerifiedToken}, openid::OIDC},
+    auth::{token::{TokenVerificationError, VerifiedToken}, openid::{OIDC, OIDCState}},
     serde_json,
     webrtc::{
         ConnectionReceiver, ICECandidate, JoinSessionError, SDPAnswer, SDPOffer, SDPOfferStream,
     },
     ws::{ManagedWebSocket, WebSocketCode, WsError}, neo_api::NeoApiConfig,
 };
-use messagist::{ExclusiveMessageHandler, MessageStream};
+use messagist::{ExclusiveMessageHandler, MessageStream, AliasableMessageHandler};
 use rustrict::CensorStr;
 use serde::{Deserialize};
 use tokio::select;
 
 use crate::{
     db::{UserProfile, DB}, leaderboard::{LeaderboardEntry, Leaderboard, self}, multiplayer::RoomCode,
-    tournament::TournamentData, GlobalState, LoginTokenConfig, LoginTokenData, LoginTokenGranter,
+    tournament::TournamentData, LoginTokenConfig, LoginTokenData, LoginTokenGranter, state::GlobalState,
 };
 
 // async fn handle_webrtc(
@@ -89,13 +88,12 @@ where
         let login_token =
             match VerifiedToken::<LoginTokenConfig>::from_request_parts(&mut parts, state).await {
                 Ok(x) => {
-                    let api = NeoApiConfig::from_ref(state);
-                    let api = api.get_handler();
+                    let api = AsRef::<NeoApiConfig<WsApiHandler>>::as_ref(state).get_handler();
 
-                    if api.inner.connections.contains(&x.item.email) {
+                    if api.connections.contains(&x.identifier.email) {
                         return Err((StatusCode::CONFLICT, "Already Connected").into_response())
                     }
-                    api.inner.connections.insert(x.item.email.clone());
+                    api.connections.insert(x.identifier.email.clone());
                     Some(x)
                 }
                 Err(TokenVerificationError::MissingToken) => None,
@@ -143,21 +141,16 @@ enum WSAPIMessage {
     },
 }
 
-pub struct WsApiHandlerImpl {
-    connections: dashmap::DashSet<String>,
-    leaderboard: Leaderboard,
-    db: DB,
-    oidc: OIDC,
-    login_tokens: LoginTokenGranter
-}
-
-#[derive(Clone)]
 pub struct WsApiHandler {
-    inner: Arc<WsApiHandlerImpl>,
+    connections: dashmap::DashSet<String>,
+    leaderboard: &'static Leaderboard,
+    db: &'static DB,
+    oidc: &'static OIDC<&'static OIDCState>,
+    login_tokens: &'static LoginTokenGranter
 }
 
 #[async_trait]
-impl ExclusiveMessageHandler for WsApiHandler {
+impl AliasableMessageHandler for WsApiHandler {
     type SessionState = SessionState;
 
     // async fn on_connection(
@@ -454,7 +447,7 @@ impl ExclusiveMessageHandler for WsApiHandler {
     // }
 
     async fn handle<S: MessageStream>(
-        &mut self,
+        &self,
         mut stream: S,
         mut session_state: Self::SessionState,
     ) {
@@ -469,12 +462,12 @@ impl ExclusiveMessageHandler for WsApiHandler {
             let Ok(msg) = stream.recv_message::<WSAPIMessage>().await else { break };
 
             if let Some(login_token) = &session_state.login_token {
-                let leaderboard = &self.inner.leaderboard;
+                let leaderboard = &self.leaderboard;
 
                 match msg {
                     WSAPIMessage::ScoreUpdateRequest { difficulty, score } => {
-                        let email = &login_token.item.email;
-                        let username = &login_token.item.username;
+                        let email = &login_token.identifier.email;
+                        let username = &login_token.identifier.username;
         
                         let res = match difficulty.as_str() {
                             "easy" => {
@@ -552,26 +545,24 @@ enum StreamStatus {
 
 
 impl WsApiHandler{
-    pub(crate) fn new(leaderboard: Leaderboard, db: DB, oidc: OIDC, login_tokens: LoginTokenGranter) -> Self {
+    pub(crate) fn new(leaderboard: &'static Leaderboard, db: &'static  DB, oidc: &'static OIDC<&'static OIDCState>, login_tokens: &'static LoginTokenGranter) -> Self {
         Self {
-            inner: Arc::new(WsApiHandlerImpl {
-                connections: Default::default(),
-                leaderboard,
-                db,
-                oidc,
-                login_tokens
-            })
+            connections: Default::default(),
+            leaderboard,
+            db,
+            oidc,
+            login_tokens
         }
     }
     async fn login<S: MessageStream>(
-        &mut self,
+        &self,
         session_state: &mut SessionState,
         stream: &mut S
     ) -> Result<StreamStatus, S::Error> {
-        let db = &self.inner.db;
-        let oidc = &self.inner.oidc;
-        let leaderboard = &self.inner.leaderboard;
-        let login_tokens = &self.inner.login_tokens;
+        let db = &self.db;
+        let oidc = &self.oidc;
+        let leaderboard = &self.leaderboard;
+        let login_tokens = &self.login_tokens;
 
         macro_rules! send {
             ($msg: expr) => {
@@ -610,10 +601,10 @@ impl WsApiHandler{
             return Ok(StreamStatus::Ok)
         };
 
-        if self.inner.connections.contains(&email) {
+        if self.connections.contains(&email) {
             send!("Already Connected");
         } else {
-            self.inner.connections.insert(email.clone());
+            self.connections.insert(email.clone());
         }
 
         match db.get_user_profile_by_email(&email).await {

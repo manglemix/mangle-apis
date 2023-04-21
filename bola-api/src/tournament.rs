@@ -2,21 +2,16 @@ use log::error;
 use mangle_api_core::rand::{rngs::StdRng, RngCore, SeedableRng};
 use serde::Serialize;
 use std::{
-    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const GET_TOURNAMENT_ERR_DURATION: Duration = Duration::from_secs(1);
 
-struct TournamentImpl {
+pub struct Tournament {
     start_time: SystemTime,
     start_time_duration: Duration,
 }
 
-#[derive(Clone)]
-pub struct Tournament {
-    inner: Arc<TournamentImpl>,
-}
 
 #[derive(Serialize)]
 pub struct TournamentData {
@@ -29,10 +24,8 @@ pub struct TournamentData {
 impl Tournament {
     pub fn new(start_time: Duration) -> Self {
         Self {
-            inner: Arc::new(TournamentImpl {
-                start_time: UNIX_EPOCH + start_time,
-                start_time_duration: start_time,
-            }),
+            start_time: UNIX_EPOCH + start_time,
+            start_time_duration: start_time,
         }
     }
 
@@ -40,7 +33,7 @@ impl Tournament {
         let now = Instant::now();
 
         let elapsed = loop {
-            let Ok(elapsed) = self.inner.start_time.elapsed() else {
+            let Ok(elapsed) = self.start_time.elapsed() else {
                 if now.elapsed() >= GET_TOURNAMENT_ERR_DURATION {
                     error!(target: "tournament", "Could not calculate tournament week");
                     return None
@@ -51,7 +44,7 @@ impl Tournament {
         };
 
         let week = elapsed / 3600 / 24 / 7;
-        let start_time = self.inner.start_time_duration.as_secs();
+        let start_time = self.start_time_duration.as_secs();
 
         Some(TournamentData {
             week,

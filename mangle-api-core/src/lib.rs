@@ -2,6 +2,7 @@
 #![feature(never_type)]
 #![feature(associated_type_bounds)]
 #![feature(exclusive_wrapper)]
+#![feature(arbitrary_self_types)]
 
 use axum::{http::HeaderValue, routing::MethodRouter, Router, Server};
 
@@ -25,7 +26,7 @@ use messagist::{
     },
     ExclusiveMessageHandler,
 };
-use std::future::{pending, Future};
+use std::{future::{pending, Future}, fmt::Display};
 
 use fern::{log_file, Dispatch};
 use log::{error, info, warn, LevelFilter};
@@ -41,7 +42,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
 };
-use tokio_native_tls::native_tls::Identity;
+pub use tokio_native_tls::native_tls::Identity;
 use toml::from_str;
 use tower::ServiceBuilder;
 use tower_http::{
@@ -344,7 +345,7 @@ pub struct API<
     const N1: usize = 0,
     const N2: usize = 0,
     H = Unset,
-    Fut = Pending<()>,
+    Fut = Pending<String>,
 > {
     state: S,
     pipe_name: P,
@@ -570,7 +571,7 @@ impl<S, P, AT, BO, const N1: usize, const N2: usize, H, Fut>
         concurrent_fut: Fut2,
     ) -> API<S, P, AT, BO, N1, N2, H, Fut2>
     where
-        Fut2: Future,
+        Fut2: Future<Output: Display>,
     {
         API {
             state: self.state,
@@ -593,7 +594,7 @@ impl<S, const N1: usize, const N2: usize, H, Fut>
 where
     S: Clone + Send + Sync + 'static,
     H: ExclusiveMessageHandler<SessionState = ()> + Send + ListenerErrorHandler + 'static,
-    Fut: Future,
+    Fut: Future<Output: Display>,
 {
     pub async fn run(self) -> Result<()> {
         // Setup Control Server
@@ -633,9 +634,9 @@ where
             tokio::select! {
                 res = tokio::signal::ctrl_c() => {
                     if let Err(e) = res {
-                        error!(target: "console_server", "Faced the following error while listening for ctrl_c: {:?}", e);
+                        error!("Faced the following error while listening for ctrl_c: {:?}", e);
                     } else {
-                        warn!(target: "console_server", "Ctrl-C received");
+                        warn!("Ctrl-C received");
                     }
                 }
                 res = control_listener => {
@@ -643,8 +644,8 @@ where
                         error!("Faced the following error while joining with the control listener task: {e:?}");
                     }
                 }
-                _ = self.concurrent_fut => {
-                    warn!("Concurrent future has ended")
+                msg = self.concurrent_fut => {
+                    warn!("{msg}")
                 }
             }
         };

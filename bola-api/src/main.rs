@@ -4,12 +4,10 @@
 #![feature(vec_push_within_capacity)]
 #![feature(never_type)]
 
-use std::{fs::read_to_string, sync::Arc, time::Duration};
+use std::{fs::read_to_string, time::Duration};
 
 use anyhow::{self, Context};
 use axum::{
-    async_trait,
-    extract::FromRef,
     http::{HeaderValue, StatusCode},
     response::Response,
 };
@@ -21,10 +19,10 @@ use mangle_api_core::{
     auth::{
         auth_pages::{AuthPages, AuthPagesSrc},
         openid::{
-            google::{new_google_oidc_from_file, GoogleOIDC},
+            google::{new_google_oidc_from_file},
             openid_redirect, OIDCState,
         },
-        token::{HeaderTokenGranterConfig, TokenGranter, TokenGranterConfig},
+        token::{HeaderTokenConfig, TokenGranter, TokenConfig},
     },
     distributed::Node,
     get_https_credentials,
@@ -38,6 +36,7 @@ use mangle_api_core::{
 };
 use messagist::{pipes::start_connection, MessageStream};
 use multiplayer::Multiplayer;
+use state::GlobalState;
 use tokio::{self};
 
 mod config;
@@ -48,13 +47,13 @@ mod multiplayer;
 mod network;
 mod tournament;
 mod ws_api;
+mod state;
 
 use config::Config;
 use tournament::Tournament;
 use ws_api::{WsApiHandler, SessionState};
 
 use crate::control::ControlClientMessage;
-// use ws_api::{FirstConnectionState, SessionState, WSAPIMessage};
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct LoginTokenData {
@@ -66,29 +65,17 @@ const WS_PING_DELAY: Duration = Duration::from_secs(45);
 
 enum LoginTokenConfig {}
 
-impl TokenGranterConfig for LoginTokenConfig {
-    type TokenDistinguisher = LoginTokenData;
+impl TokenConfig for LoginTokenConfig {
+    type TokenIdentifier = LoginTokenData;
     const TOKEN_LENGTH: usize = 32;
 }
 
-impl HeaderTokenGranterConfig for LoginTokenConfig {
+impl HeaderTokenConfig for LoginTokenConfig {
     const HEADER_NAME: &'static str = "Login-Token";
 }
 
 type LoginTokenGranter = TokenGranter<LoginTokenConfig>;
 
-#[derive(Clone, FromRef)]
-struct GlobalState {
-    db: DB,
-    oidc_state: OIDCState,
-    goidc: GoogleOIDC,
-    auth_pages: AuthPages,
-    login_tokens: LoginTokenGranter,
-    leaderboard: Leaderboard,
-    ws_api: NeoApiConfig<WsApiHandler>,
-    tournament: Tournament,
-    multiplayer: Multiplayer,
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -129,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
     .apply()
     .context("Setting up logger")?;
 
-    let https_der = if config.https {
+    let https_identity = if config.https {
         if config.https_domain.is_empty() {
             return Err(anyhow::Error::msg(
                 "https is true, but https_domain is empty",
@@ -150,56 +137,11 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-
+    
     let css = read_to_string(&config.stylesheet_path)
         .context(format!("Reading {}", config.stylesheet_path))?;
-    let internal_error_page = read_to_string(&config.internal_error_path)
-        .context(format!("Reading {}", config.internal_error_path))?;
-    let invalid_page =
-        read_to_string(&config.invalid_path).context(format!("Reading {}", config.invalid_path))?;
-    let success_page =
-        read_to_string(&config.success_path).context(format!("Reading {}", config.success_path))?;
-    let late_page =
-        read_to_string(&config.late_path).context(format!("Reading {}", config.late_path))?;
 
-    let oidc_state = OIDCState::default();
-
-    let node = Node::new(
-        config.sibling_domains,
-        config.network_port,
-        https_der.clone(),
-    )
-    .await?;
-    let db = DB::new(&aws_config, config.bola_profiles_table);
-
-    let goidc = new_google_oidc_from_file(
-        config.google_client_secret_path,
-        oidc_state.clone(),
-        &(config.oidc_redirect_base + "/oidc/redirect"),
-    )
-    .await
-    .context("parsing google oauth")?;
-
-    let leaderboard = Leaderboard::new(db.clone(), node, 5).await?;
-    let login_tokens = LoginTokenGranter::new(config.token_duration);
-
-    let state = GlobalState {
-        goidc: goidc.clone(),
-        auth_pages: AuthPages::new(AuthPagesSrc {
-            internal_error: internal_error_page,
-            late: late_page,
-            invalid: invalid_page,
-            success: success_page,
-        }),
-        oidc_state,
-        login_tokens: login_tokens.clone(),
-        leaderboard: leaderboard.clone(),
-        db: db.clone(),
-        // api_conn_manager: APIConnectionManager::new(WS_PING_DELAY),
-        tournament: Tournament::new(config.start_week_time),
-        multiplayer: Multiplayer::default(),
-        ws_api: NeoApiConfig::new(WS_PING_DELAY, WsApiHandler::new(leaderboard, db, goidc.0, login_tokens))
-    };
+    let state: GlobalState = new_global!(config, https_identity, aws_config);
 
     let (control_handler, control_handler_recv) = new_control_handler();
 
@@ -258,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
         .set_control_handler(control_handler)
         .set_concurrent_future(control_handler_recv);
 
-    if let Some(https_der) = https_der {
+    if let Some(https_der) = https_identity {
         api.set_https_identity(https_der).run().await
     } else {
         api.run().await

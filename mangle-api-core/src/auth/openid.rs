@@ -1,4 +1,4 @@
-use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration, ops::Deref};
 
 use axum::{
     body::HttpBody,
@@ -28,18 +28,19 @@ async fn new_oidc_client(
 }
 
 #[derive(Clone)]
-pub struct OIDC {
-    oidc_state: OIDCState,
+pub struct OIDC<S: Deref<Target=OIDCState> + Clone> {
+    oidc_state: S,
     client: Arc<DiscoveredClient>,
 }
 
-impl OIDC {
+
+impl<S: Deref<Target=OIDCState> + Clone> OIDC<S> {
     async fn new(
         client_id: String,
         client_secret: String,
         redirect_url: String,
         issuer_url: Url,
-        oidc_state: OIDCState,
+        oidc_state: S,
     ) -> Result<Self, openid::error::Error> {
         Ok(Self {
             oidc_state,
@@ -81,8 +82,7 @@ impl OIDC {
 
         let (ready_sender, receiver) = channel();
 
-        let oidc_state = self.oidc_state.clone();
-        let untracker = oidc_state.track_session(csrf_token, self.client.clone(), ready_sender);
+        let untracker = track_session(self.oidc_state.clone(), csrf_token, self.client.clone(), ready_sender);
 
         let fut = async move {
             let _untracker = untracker;
@@ -106,43 +106,45 @@ struct PendingSession {
     client: Arc<DiscoveredClient>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct OIDCState {
-    pending_auths: Arc<Mutex<HashMap<String, PendingSession>>>,
+    pending_auths: Mutex<HashMap<String, PendingSession>>,
 }
 
-struct Untracker {
-    oauth_state: OIDCState,
+struct Untracker<S: Deref<Target=OIDCState>> {
+    oauth_state: S,
     csrf_token: String,
 }
 
-impl Drop for Untracker {
+impl<S: Deref<Target=OIDCState>> Drop for Untracker<S> {
     fn drop(&mut self) {
         self.oauth_state.untrack_session(&self.csrf_token);
     }
 }
 
-impl OIDCState {
-    fn track_session(
-        &self,
-        csrf_token: String,
-        client: Arc<DiscoveredClient>,
-        ready_sender: Sender<Userinfo>,
-    ) -> Untracker {
-        self.pending_auths.lock().insert(
-            csrf_token.clone(),
-            PendingSession {
-                ready_sender,
-                client,
-            },
-        );
 
-        Untracker {
-            oauth_state: self.clone(),
-            csrf_token,
-        }
+fn track_session<S: Deref<Target=OIDCState>>(
+    oauth_state: S,
+    csrf_token: String,
+    client: Arc<DiscoveredClient>,
+    ready_sender: Sender<Userinfo>,
+) -> Untracker<S> {
+    oauth_state.pending_auths.lock().insert(
+        csrf_token.clone(),
+        PendingSession {
+            ready_sender,
+            client,
+        },
+    );
+
+    Untracker {
+        oauth_state,
+        csrf_token,
     }
+}
 
+
+impl OIDCState {
     fn untrack_session(&self, csrf_token: &str) {
         let _ = self.pending_auths.lock().remove(csrf_token);
     }
@@ -200,22 +202,24 @@ pub struct AuthRedirectParams {
     code: String,
 }
 
-pub async fn oidc_redirect_handler(
+pub async fn oidc_redirect_handler<S>(
     Query(AuthRedirectParams { state, code }): Query<AuthRedirectParams>,
-    State(oauth_state): State<OIDCState>,
-    State(pages): State<AuthPages>,
-) -> Html<String> {
-    oauth_state.verify_auth(code, state, pages).await
+    State(global_state): State<S>,
+    State(pages): State<AuthPages>
+) -> Html<String>
+where
+    S: AsRef<OIDCState>
+{
+    AsRef::<OIDCState>::as_ref(&global_state).verify_auth(code, state, pages).await
 }
 
 pub fn openid_redirect<S, B>() -> MethodRouter<S, B>
 where
     AuthPages: FromRef<S>,
-    OIDCState: FromRef<S>,
-    S: Send + Sync + Clone + 'static,
+    S: AsRef<OIDCState> + Send + Sync + Clone + 'static,
     B: Send + Sync + HttpBody + 'static, // AuthPages: FromRef<S>
 {
-    axum::routing::get(oidc_redirect_handler)
+    axum::routing::get(oidc_redirect_handler::<S>)
 }
 
 use serde::Deserialize;
@@ -233,13 +237,13 @@ pub mod google {
 
     use super::*;
     #[derive(Clone)]
-    pub struct GoogleOIDC(pub OIDC);
+    pub struct GoogleOIDC<S: Deref<Target=OIDCState> + Clone>(pub OIDC<S>);
 
-    pub async fn new_google_oidc_from_file(
+    pub async fn new_google_oidc_from_file<S: Deref<Target=OIDCState> + Clone>(
         filename: impl AsRef<Path>,
-        oidc_state: OIDCState,
+        oidc_state: S,
         redirect_url: &str,
-    ) -> anyhow::Result<GoogleOIDC> {
+    ) -> anyhow::Result<GoogleOIDC<S>> {
         #[derive(Deserialize, Debug)]
         struct ClientSecret {
             client_id: String,

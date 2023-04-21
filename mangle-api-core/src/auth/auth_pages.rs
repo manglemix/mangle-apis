@@ -1,4 +1,4 @@
-use std::{borrow::Cow, mem::transmute, sync::Arc};
+use std::{borrow::Cow, mem::transmute, sync::Arc, marker::PhantomPinned, pin::Pin};
 
 pub struct AuthPagesSrc {
     pub late: String,
@@ -9,7 +9,7 @@ pub struct AuthPagesSrc {
 
 #[derive(Clone)]
 pub struct AuthPages {
-    _src: Arc<AuthPagesSrc>,
+    _src: Pin<Arc<(AuthPagesSrc, PhantomPinned)>>,
     pub(crate) late: Cow<'static, String>,
     pub(crate) invalid: Cow<'static, String>,
     pub(crate) internal_error: Cow<'static, String>,
@@ -18,16 +18,16 @@ pub struct AuthPages {
 
 impl AuthPages {
     pub fn new(src: AuthPagesSrc) -> Self {
-        let _src = Arc::new(src);
+        let _src = Arc::pin((src, PhantomPinned));
         // Borrows of fields are tied to this struct, not static
         // This is fine because this struct holds an Arc of the src,
         // so borrows will be valid for as long as the struct is alive
         unsafe {
             Self {
-                late: Cow::Borrowed(transmute(&_src.late)),
-                invalid: Cow::Borrowed(transmute(&_src.invalid)),
-                internal_error: Cow::Borrowed(transmute(&_src.internal_error)),
-                success: Cow::Borrowed(transmute(&_src.success)),
+                late: Cow::Borrowed(transmute(&_src.0.late)),
+                invalid: Cow::Borrowed(transmute(&_src.0.invalid)),
+                internal_error: Cow::Borrowed(transmute(&_src.0.internal_error)),
+                success: Cow::Borrowed(transmute(&_src.0.success)),
                 _src,
             }
         }

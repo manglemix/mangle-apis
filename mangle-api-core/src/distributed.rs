@@ -1,13 +1,11 @@
-use std::{mem::take, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::Error;
 use bimap::BiMap;
-use bincode::{deserialize, serialize};
-use log::{error, warn};
-use parking_lot::Mutex;
-use serde::{de::DeserializeOwned, Serialize};
+use log::{warn};
+use messagist::{bin::BinaryMessageStream, MessageStream, ExclusiveMessageHandler};
+use serde::{Serialize};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     spawn,
     task::JoinHandle,
@@ -17,167 +15,149 @@ use tokio_native_tls::{
     TlsAcceptor as TlsAcceptorWrapper, TlsConnector as TlsConnectorWrapper,
 };
 
-pub trait MessageRouter<T>: Send + Sync {
-    fn new() -> Self;
-    /// Sends the given message to the right handlers
-    ///
-    /// Returns true iff it is possible to continue sending messages.
-    /// For example, this should return false if it there are no handlers
-    /// and it is not handlers for there to be more
-    fn route_message(&self, domain: &Arc<str>, message: T) -> bool;
-}
 
-pub trait NetworkMessageSet: Sized + DeserializeOwned + Serialize + 'static {
-    type MessageRouter: MessageRouter<Self>;
-}
+pub struct ServerName(pub Arc<str>);
 
-struct NodeImpl<T: NetworkMessageSet> {
-    sibling_domains: BiMap<Arc<str>, SocketAddr>,
-    message_router: T::MessageRouter,
+
+pub struct Node<H>
+where
+    H: ExclusiveMessageHandler<SessionState = ServerName> + Clone + Send + Sync + 'static
+{
+    sibling_domains: Arc<BiMap<Arc<str>, SocketAddr>>,
     tls_builder: Option<TlsConnectorWrapper>,
     network_port: u16,
-    task_handle: Mutex<Option<JoinHandle<()>>>,
+    task_handle: JoinHandle<()>,
+    handler: H
 }
 
-impl<T: NetworkMessageSet> Drop for NodeImpl<T> {
+impl<H> Drop for Node<H>
+where
+    H: ExclusiveMessageHandler<SessionState = ServerName> + Clone + Send + Sync + 'static
+{
     fn drop(&mut self) {
-        if let Some(x) = take(self.task_handle.get_mut()) {
-            x.abort()
-        }
+        self.task_handle.abort();
     }
 }
 
-#[derive(Clone)]
-pub struct Node<T: NetworkMessageSet> {
-    inner: Arc<NodeImpl<T>>,
-}
 
-impl<T: NetworkMessageSet> Node<T> {
+impl<H> Node<H>
+where
+    H: ExclusiveMessageHandler<SessionState = ServerName> + Clone + Send + Sync + 'static
+{
     pub async fn new(
         sibling_domains: impl IntoIterator<Item = (String, SocketAddr)>,
         network_port: u16,
         identity: Option<Identity>,
-    ) -> anyhow::Result<Self> {
-        let inner2 = Arc::new(NodeImpl {
-            message_router: T::MessageRouter::new(),
-            tls_builder: if identity.is_some() {
-                Some(TlsConnectorWrapper::from(TlsConnector::builder().build()?))
-            } else {
-                None
-            },
-            sibling_domains: sibling_domains
-                .into_iter()
-                .map(|(mut domain, addr)| unsafe {
-                    domain.shrink_to_fit();
-                    (Arc::from(Box::from_raw(domain.leak())), addr)
-                })
-                .collect(),
-            network_port,
-            task_handle: Default::default(),
-        });
+        handler: H
+    ) -> anyhow::Result<Self>
+    {
+        let sibling_domains = Arc::new(sibling_domains
+            .into_iter()
+            .map(|(domain, addr)|
+                (Arc::from(domain.into_boxed_str()), addr)
+            )
+            .collect::<BiMap<_, _>>());
 
-        let inner = inner2.clone();
-        let tls_acceptor = if let Some(identity) = identity {
-            Some(TlsAcceptorWrapper::from(TlsAcceptor::new(identity)?))
+        let sibling_domains2 = sibling_domains.clone();
+
+        let tls_acceptor;
+        let tls_builder;
+        
+        if let Some(identity) = identity {
+            tls_builder = Some(TlsConnectorWrapper::from(TlsConnector::builder().build()?));
+            tls_acceptor = Some(TlsAcceptorWrapper::from(TlsAcceptor::new(identity)?))
         } else {
-            None
+            tls_builder = None;
+            tls_acceptor = None;
         };
         let acceptor = TcpListener::bind(("0.0.0.0", network_port)).await?;
+        let handler2 = handler.clone();
 
-        *inner2.task_handle.lock() = Some(spawn(async move {
+        let task_handle = spawn(async move {
             loop {
-                let Ok((mut stream, addr)) = acceptor.accept().await else { continue };
+                let Ok((stream, addr)) = acceptor.accept().await else { continue };
 
-                let inner2 = inner.clone();
+                let Some(connection_domain) = sibling_domains2.get_by_right(&addr).cloned() else {
+                    warn!(target: "security", "Got attempted connection from {addr}");
+                    return
+                };
+
+                let server_name = ServerName(connection_domain);
+
+                let mut handler2 = handler2.clone();
                 let tls_acceptor2 = tls_acceptor.clone();
 
                 spawn(async move {
-                    let Some(connection_domain) = inner2.sibling_domains.get_by_right(&addr) else {
-                        warn!(target: "security", "Got attempted connection from {addr}");
-                        return
-                    };
-
-                    macro_rules! read {
-                        ($stream: expr) => {{
-                            let mut buf = Vec::new();
-                            if $stream.read_to_end(&mut buf).await.is_err() {
-                                return;
-                            }
-                            let Ok(msg) = deserialize(buf.as_slice()) else {
-                                                        error!("Received bad message from {addr}");
-                                                        return
-                                                    };
-
-                            T::MessageRouter::route_message(
-                                &inner2.message_router,
-                                connection_domain,
-                                msg,
-                            );
-                        }};
-                    }
-
                     match &tls_acceptor2 {
                         Some(tls_acceptor) => {
-                            let Ok(mut stream) = tls_acceptor.accept(stream).await else { return };
-                            read!(stream)
+                            let Ok(stream) = tls_acceptor.accept(stream).await else { return };
+                            handler2.handle(BinaryMessageStream::from(stream), server_name)
                         }
-                        None => read!(stream),
+                        None => handler2.handle(BinaryMessageStream::from(stream), server_name),
                     };
                 });
             }
-        }));
+        });
 
-        Ok(Self { inner: inner2 })
+        Ok(Self {
+            tls_builder,
+            sibling_domains,
+            network_port,
+            task_handle,
+            handler
+        })
     }
 
-    pub fn get_message_router(&self) -> &T::MessageRouter {
-        &self.inner.message_router
-    }
-
-    pub async fn send_message(&self, domain: &str, message: &T) -> Result<(), Error> {
-        let message = serialize(message).expect("message to serialize");
-        if !self.inner.sibling_domains.contains_left(domain) {
+    pub async fn send_message<T>(&self, domain: &str, message: T) -> Result<(), Error>
+    where
+       T: Serialize + Send + Sync 
+    {
+        if !self.sibling_domains.contains_left(domain) {
             return Err(Error::msg(format!("{domain} is not a sibling")));
         }
-        let mut connection = TcpStream::connect((domain, self.inner.network_port)).await?;
-        match &self.inner.tls_builder {
-            Some(tls_builder) => tls_builder
+
+        let connection = TcpStream::connect((domain, self.network_port)).await?;
+
+        match &self.tls_builder {
+            Some(tls_builder) => BinaryMessageStream::from(tls_builder
                 .connect(domain, connection)
-                .await?
-                .write_all(message.as_slice())
+                .await?)
+                .send_message(message)
                 .await
                 .map_err(Into::into),
-            None => connection
-                .write_all(message.as_slice())
+            None => BinaryMessageStream::from(connection)
+                .send_message(message)
                 .await
                 .map_err(Into::into),
         }
     }
 
-    pub async fn broadcast_message(&self, message: &T) -> Vec<(String, Error)> {
-        let message = serialize(message).expect("message to serialize");
+    pub async fn broadcast_message<T>(&self, message: T) -> Vec<(String, Error)>
+    where
+       T: Serialize + Send + Sync 
+    {
         let mut results = vec![];
         let domains = self
-            .inner
             .sibling_domains
             .left_values()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
 
         for domain in domains {
-            let mut connection =
-                match TcpStream::connect((domain.as_str(), self.inner.network_port)).await {
+            let connection =
+                match TcpStream::connect((domain.as_str(), self.network_port)).await {
                     Ok(x) => x,
                     Err(e) => {
                         results.push((domain, e.into()));
                         continue;
                     }
                 };
-            match &self.inner.tls_builder {
+            match &self.tls_builder {
                 Some(tls_builder) => {
                     match tls_builder.connect(&domain, connection).await {
-                        Ok(mut connection) => {
-                            if let Err(e) = connection.write_all(message.as_slice()).await {
+                        Ok(connection) => {
+                            let mut connection = BinaryMessageStream::from(connection);
+                            if let Err(e) = connection.send_message(&message).await {
                                 results.push((domain, e.into()));
                             }
                         }
@@ -188,7 +168,7 @@ impl<T: NetworkMessageSet> Node<T> {
                     };
                 }
                 None => {
-                    if let Err(e) = connection.write_all(message.as_slice()).await {
+                    if let Err(e) = BinaryMessageStream::from(connection).send_message(&message).await {
                         results.push((domain, e.into()));
                     }
                 }
@@ -196,5 +176,13 @@ impl<T: NetworkMessageSet> Node<T> {
         }
 
         results
+    }
+
+    pub fn get_handler(&self) -> &H {
+        &self.handler
+    }
+
+    pub fn get_mut_handler(&mut self) -> &mut H {
+        &mut self.handler
     }
 }
