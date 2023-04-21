@@ -118,7 +118,7 @@ impl Leaderboard {
         node: &'static Node<SiblingNetworkHandler>,
         leaderboard_span: usize,
     ) -> Result<&'static Self, anyhow::Error> {
-        let leaderboard = Self {
+        let leaderboard = manglext::immut_leak(Self {
             easy_leaderboard: RwLock::new(
                 Self::pull_leaderboard(&db, "easy_highscore", leaderboard_span).await?,
             ),
@@ -133,7 +133,7 @@ impl Leaderboard {
             leaderboard_updater: channel(LEADERBOARD_UPDATE_BUFFER_SIZE).0,
             db,
             node,
-        };
+        });
         let mut subscription = node.get_handler().subscribe_to_highscore_update();
 
         spawn(async move {
@@ -175,7 +175,7 @@ impl Leaderboard {
             }
         });
 
-        todo!()
+        Ok(leaderboard)
     }
 
     fn local_update_leaderboard(

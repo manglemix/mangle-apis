@@ -587,8 +587,11 @@ impl WsApiHandler {
 
         let auth_option = select! {
             opt = fut => { opt }
-            err = stream.wait_for_error() => {
-                return Err(err)
+            res = stream.recv_message::<String>() => {
+                // Return if error
+                res?;
+                send!("Login Cancelled");
+                return Ok(StreamStatus::Ok)
             }
         };
 
@@ -603,6 +606,7 @@ impl WsApiHandler {
 
         if self.connections.contains(&email) {
             send!("Already Connected");
+            return Ok(StreamStatus::Ok)
         } else {
             self.connections.insert(email.clone());
         }

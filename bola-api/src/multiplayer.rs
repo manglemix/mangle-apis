@@ -12,7 +12,7 @@ impl TryFrom<u16> for RoomCode {
     type Error = TryFromIntError;
 
     fn try_from(value: u16) -> Result<Self, Self::Error> {
-        NonZeroU16::try_from(value).map(|x| Self(x))
+        NonZeroU16::try_from(value).map(Self)
     }
 }
 
